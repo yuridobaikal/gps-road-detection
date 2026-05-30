@@ -2,7 +2,6 @@ package matching
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -122,8 +121,7 @@ SELECT
             WHERE ST_DWithin(lr.geom, scored.geom, 2.0)
         ) THEN 'connected'
         ELSE 'unconnected'
-    END AS connectivity,
-    ST_AsGeoJSON(ST_Transform(geom, 4326)) AS geometry
+    END AS connectivity
 FROM scored
 ORDER BY distance_score DESC, distance_meters ASC
 LIMIT ($4::integer * 2);
@@ -230,8 +228,7 @@ SELECT
             WHERE ST_DWithin(lr.geom, scored.geom, 2.0)
         ) THEN 'connected'
         ELSE 'unconnected'
-    END AS connectivity,
-    ST_AsGeoJSON(ST_Transform(geom, 4326)) AS geometry
+    END AS connectivity
 FROM scored
 ORDER BY distance_score DESC, distance_meters ASC
 LIMIT ($4::integer * 2);
@@ -240,11 +237,6 @@ LIMIT ($4::integer * 2);
 type PostGISMatcher struct {
 	pool         *pgxpool.Pool
 	candidateSQL string
-}
-
-type geoJSONLineString struct {
-	Type        string      `json:"type"`
-	Coordinates [][]float64 `json:"coordinates"`
 }
 
 func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string) (*PostGISMatcher, error) {
@@ -297,8 +289,8 @@ func (m *PostGISMatcher) Match(ctx context.Context, req *pb.MatchRoadRequest) (*
 		SequenceId: req.GetSequenceId(),
 		Matched:    true,
 		Confidence: confidence(candidates[0].Score, secondScore),
-		Best:       candidates[0],
-		Candidates: candidates,
+		Best:       responseCandidate(candidates[0]),
+		Candidates: responseCandidates(candidates),
 	}, nil
 }
 
@@ -317,7 +309,6 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 			candidate     pb.RoadCandidate
 			distanceScore float64
 			localBearing  float64
-			geometryJSON  string
 		)
 
 		if err := rows.Scan(
@@ -330,7 +321,6 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 			&distanceScore,
 			&localBearing,
 			&candidate.Connectivity,
-			&geometryJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan postgis candidate: %w", err)
 		}
@@ -345,7 +335,6 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 			candidate.HeadingScore*0.25 +
 			candidate.ConnectivityScore*0.25 +
 			classScore*0.15
-		candidate.Geometry = parseLineStringGeometry(geometryJSON)
 
 		if candidate.DistanceMeters > radius {
 			continue
@@ -409,28 +398,6 @@ func roadSourceSQL(roadTable string) (string, error) {
 
 func isNormalizedRoadTable(roadTable string) bool {
 	return strings.TrimSpace(roadTable) == "roads"
-}
-
-func parseLineStringGeometry(raw string) []*pb.LatLon {
-	var geometry geoJSONLineString
-	if err := json.Unmarshal([]byte(raw), &geometry); err != nil {
-		return nil
-	}
-	if geometry.Type != "LineString" {
-		return nil
-	}
-
-	points := make([]*pb.LatLon, 0, len(geometry.Coordinates))
-	for _, coordinate := range geometry.Coordinates {
-		if len(coordinate) < 2 {
-			continue
-		}
-		points = append(points, &pb.LatLon{
-			Lon: coordinate[0],
-			Lat: coordinate[1],
-		})
-	}
-	return points
 }
 
 func headingDiffForRoad(gpsHeading, localBearing float64, oneway string) float64 {

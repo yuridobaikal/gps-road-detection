@@ -47,7 +47,7 @@ OSM road database
 14. App optionally draws candidate roads on map for debugging.
 ```
 
-The mobile UI should not block on each backend response. While backend matching is pending, the app should continue showing the last confident road and use cached geometry to keep the result stable.
+The mobile UI should not block on each backend response. While backend matching is pending, the app should continue showing the last confident road and current GPS point.
 
 ## 3. Main Data Inputs
 
@@ -300,18 +300,8 @@ message MatchRoadResponse {
 
 message RoadCandidate {
   int64 road_id = 1;
-  int64 osm_id = 2;
   string name = 3;
-  string highway = 4;
-  string oneway = 5;
-  double distance_meters = 6;
-  optional double heading_diff = 7;
-  string connectivity = 8;
-  double distance_score = 9;
-  double heading_score = 10;
-  double connectivity_score = 11;
   double score = 12;
-  repeated LatLon geometry = 13;
 }
 
 message LatLon {
@@ -329,54 +319,19 @@ Example logical response:
   "confidence": "high",
   "best": {
     "road_id": 123456789,
-    "osm_id": 123456789,
     "name": "Khuất Duy Tiến",
-    "highway": "primary",
-    "oneway": "no",
-    "distance_meters": 4.8,
-    "heading_diff": 3.0,
-    "connectivity": "same_road",
-    "distance_score": 0.90,
-    "heading_score": 1.00,
-    "connectivity_score": 1.00,
     "score": 0.91
   },
   "candidates": [
     {
       "road_id": 123456789,
-      "osm_id": 123456789,
       "name": "Khuất Duy Tiến",
-      "highway": "primary",
-      "oneway": "no",
-      "distance_meters": 4.8,
-      "heading_diff": 3.0,
-      "connectivity": "same_road",
-      "distance_score": 0.90,
-      "heading_score": 1.00,
-      "connectivity_score": 1.00,
-      "score": 0.91,
-      "geometry": {
-        "type": "LineString",
-        "coordinates": []
-      }
+      "score": 0.91
     },
     {
       "road_id": 987654321,
-      "osm_id": 987654321,
       "name": "Service Road",
-      "highway": "service",
-      "oneway": "no",
-      "distance_meters": 7.1,
-      "heading_diff": 44.0,
-      "connectivity": "nearby_unconnected",
-      "distance_score": 0.86,
-      "heading_score": 0.40,
-      "connectivity_score": 0.10,
-      "score": 0.52,
-      "geometry": {
-        "type": "LineString",
-        "coordinates": []
-      }
+      "score": 0.52
     }
   ]
 }
@@ -445,7 +400,6 @@ last confident road
 last matched road ID
 recent GPS history
 recent backend responses
-recent candidate road geometries
 current message sequence ID
 ```
 
@@ -454,7 +408,7 @@ On each GPS update:
 ```text
 1. Update current GPS dot, speed, heading, and accuracy immediately.
 2. Keep displaying the last confident road while backend matching is pending.
-3. If cached geometry exists, project the current GPS point against the last matched road/candidates.
+3. Keep the current GPS point visible on the map.
 4. Send a backend stream message only when interval or distance rules allow.
 5. Accept backend result only if sequence_id is current.
 6. Switch roads only when score, confidence, heading, and connectivity justify it.
@@ -523,7 +477,7 @@ Each log line should contain:
 - request type: unary or stream
 - matcher duration
 - full GPS request, including history and last road ID
-- full backend response, including best road, candidates, scores, and geometry
+- backend response, including best road, candidates, and scores
 - error details, if matching failed
 
 Use JSON Lines so each GPS update is one independent record. Rotate the active trip log when it reaches 10MB, gzip the rotated file, and continue writing to a new active file.
@@ -635,10 +589,11 @@ Candidate data needed by the scorer:
 - oneway value
 - distance from GPS point
 - local road bearing near the GPS point
-- geometry for map display
 - connectivity relation to the last matched road
 
 Return more candidates than the UI needs, then score and keep the top results.
+
+The response should stay small. Return only road ID, road name, and score for best road and candidates. Do not return road geometry in the live response unless a separate debug mode is enabled.
 
 ## 8. Candidate Scoring Algorithm
 
@@ -831,7 +786,7 @@ Return candidates even when confidence is low. The app can display debug informa
 5. Score each candidate using distance, heading, connectivity, and road class.
 6. Sort candidates by final score, then distance.
 7. Calculate confidence from best score and best-vs-second score gap.
-8. Return sequence ID, best road, confidence, candidate list, geometry, and scoring metadata.
+8. Return sequence ID, best road, confidence, candidate list, and processing duration.
 
 ## 13. Accelerometer and Gyroscope Plan
 
@@ -934,15 +889,9 @@ Show top candidates:
 
 ```text
 1. 123456789  Khuất Duy Tiến
-   primary
-   distance: 4.8m
-   heading diff: 3.0 degrees
    score: 0.91
 
 2. 987654321  Service Road
-   service
-   distance: 7.1m
-   heading diff: 44.0 degrees
    score: 0.52
 ```
 
@@ -951,13 +900,10 @@ Show top candidates:
 Draw:
 
 ```text
-blue dot   = current GPS point
-green line = best matched road
-yellow     = other candidates
-red line   = low-confidence candidate
+blue dot = current GPS point
 ```
 
-This is extremely useful for tuning the algorithm.
+Keep live map rendering light. Candidate road geometry can be reintroduced later behind an explicit debug mode.
 
 ## 15. Implementation Phases
 
@@ -986,7 +932,7 @@ Goal:
 - Query PostGIS for nearby roads from raw OSM tables or a normalized road table.
 - Use backend cache for road geometry and repeated candidate lookups.
 - Score candidates with distance, road class, heading, last road, and graph/connectivity.
-- Return top candidates, best match, confidence, geometry, and sequence ID.
+- Return top candidates, best match, confidence, and sequence ID.
 
 Deliverables:
 
@@ -1003,14 +949,13 @@ Deliverables:
 
 Goal:
 
-- Draw GPS point and road candidates on map.
-- Visually inspect matching quality.
+- Draw GPS point on map.
+- Keep live map rendering lightweight.
 
 Deliverables:
 
 - `flutter_map` screen
-- candidate polylines
-- best road highlight
+- current GPS marker
 
 ### Phase 4 — Scoring V1
 
@@ -1121,7 +1066,7 @@ Python remains useful for prototyping the algorithm, replay tooling, and offline
 
 1. The first version should focus on visibility, continuity, and debugging, not perfect matching.
 2. Always return multiple candidates, not only the best road.
-3. Display candidate geometry on the map to tune scoring.
+3. Keep live response payloads small; do not return geometry by default.
 4. Use GPS accuracy to adjust search radius.
 5. Use last road and graph connectivity to reduce road jumping.
 6. Add accelerometer and gyroscope only after the GPS/PostGIS algorithm works.
@@ -1156,7 +1101,7 @@ The MVP is complete when:
 - Backend applies distance, road class, heading, last-road continuity, and graph/connectivity scoring.
 - Backend returns confidence and debug scoring metadata.
 - Flutter displays best road and candidate list.
-- Flutter map shows GPS point and candidate road lines.
+- Flutter map shows current GPS point.
 - Frontend can show an immediate stable road result while waiting for backend.
 ```
 

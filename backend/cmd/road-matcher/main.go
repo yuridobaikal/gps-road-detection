@@ -140,19 +140,11 @@ func (s *roadMatcherServer) logResponse(kind string, resp *pb.MatchRoadResponse)
 	)
 	for i, candidate := range resp.GetCandidates() {
 		log.Printf(
-			"%s candidate[%d] road_id=%d osm_id=%d name=%q highway=%s distance=%.1f heading_diff=%.1f distance_score=%.3f heading_score=%.3f connectivity=%s connectivity_score=%.3f score=%.3f",
+			"%s candidate[%d] road_id=%d name=%q score=%.3f",
 			kind,
 			i,
 			candidate.GetRoadId(),
-			candidate.GetOsmId(),
 			candidate.GetName(),
-			candidate.GetHighway(),
-			candidate.GetDistanceMeters(),
-			candidate.GetHeadingDiff(),
-			candidate.GetDistanceScore(),
-			candidate.GetHeadingScore(),
-			candidate.GetConnectivity(),
-			candidate.GetConnectivityScore(),
 			candidate.GetScore(),
 		)
 	}

@@ -362,7 +362,7 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
           const SizedBox(height: 12),
           _GpsPanel(position: _position, historyCount: _history.length),
           const SizedBox(height: 12),
-          _MapDebugPanel(position: _position, response: _lastResponse),
+          _MapDebugPanel(position: _position),
           const SizedBox(height: 12),
           _CandidateList(candidates: _lastResponse?.candidates ?? const []),
         ],
@@ -457,7 +457,7 @@ class _RoadPanel extends StatelessWidget {
         : '${road!.roadId}  ${road!.name.isNotEmpty ? road!.name : '(unnamed road)'}';
     final subtitle = road == null
         ? 'Waiting for backend match'
-        : '${road!.highway}  confidence ${response?.confidence ?? '-'}';
+        : 'confidence ${response?.confidence ?? '-'}';
 
     return _Panel(
       child: Column(
@@ -470,12 +470,7 @@ class _RoadPanel extends StatelessWidget {
           if (road != null) ...[
             const SizedBox(height: 12),
             _Metric(label: 'Road ID', value: '${road!.roadId}'),
-            _Metric(
-              label: 'Distance',
-              value: '${road!.distanceMeters.toStringAsFixed(1)} m',
-            ),
             _Metric(label: 'Score', value: road!.score.toStringAsFixed(3)),
-            _Metric(label: 'Connectivity', value: road!.connectivity),
           ],
         ],
       ),
@@ -525,23 +520,21 @@ class _GpsPanel extends StatelessWidget {
 }
 
 class _MapDebugPanel extends StatelessWidget {
-  const _MapDebugPanel({required this.position, required this.response});
+  const _MapDebugPanel({required this.position});
 
   static const _fallbackCenter = LatLng(21.027763, 105.834160);
 
   final Position? position;
-  final MatchRoadResponse? response;
 
   @override
   Widget build(BuildContext context) {
     final currentPoint = position == null
         ? null
         : LatLng(position!.latitude, position!.longitude);
-    final center = currentPoint ?? _firstGeometryPoint() ?? _fallbackCenter;
+    final center = currentPoint ?? _fallbackCenter;
     final centerKey =
         '${center.latitude.toStringAsFixed(5)},'
-        '${center.longitude.toStringAsFixed(5)},'
-        '${response?.sequenceId ?? 0}';
+        '${center.longitude.toStringAsFixed(5)}';
 
     return _Panel(
       child: Column(
@@ -567,7 +560,6 @@ class _MapDebugPanel extends StatelessWidget {
                         'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                     userAgentPackageName: 'com.example.flutter_app',
                   ),
-                  PolylineLayer(polylines: _polylines()),
                   if (currentPoint != null)
                     MarkerLayer(
                       markers: [
@@ -587,78 +579,8 @@ class _MapDebugPanel extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 10),
-          const Row(
-            children: [
-              _LegendSwatch(color: Colors.blue, label: 'GPS'),
-              SizedBox(width: 12),
-              _LegendSwatch(color: Colors.green, label: 'Best'),
-              SizedBox(width: 12),
-              _LegendSwatch(color: Colors.amber, label: 'Candidate'),
-            ],
-          ),
         ],
       ),
-    );
-  }
-
-  LatLng? _firstGeometryPoint() {
-    final candidates = response?.candidates;
-    if (candidates == null) {
-      return null;
-    }
-    for (final candidate in candidates) {
-      if (candidate.geometry.isNotEmpty) {
-        final point = candidate.geometry.first;
-        return LatLng(point.lat, point.lon);
-      }
-    }
-    return null;
-  }
-
-  List<Polyline> _polylines() {
-    final candidates = response?.candidates ?? const <RoadCandidate>[];
-    final bestRoadId = response?.hasBest() == true
-        ? response!.best.roadId
-        : null;
-
-    return [
-      for (final candidate in candidates)
-        if (candidate.geometry.length >= 2)
-          Polyline(
-            points: [
-              for (final point in candidate.geometry)
-                LatLng(point.lat, point.lon),
-            ],
-            color: candidate.roadId == bestRoadId ? Colors.green : Colors.amber,
-            strokeWidth: candidate.roadId == bestRoadId ? 5 : 3,
-          ),
-    ];
-  }
-}
-
-class _LegendSwatch extends StatelessWidget {
-  const _LegendSwatch({required this.color, required this.label});
-
-  final Color color;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 12,
-          height: 12,
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(2),
-          ),
-        ),
-        const SizedBox(width: 5),
-        Text(label),
-      ],
     );
   }
 }
@@ -695,9 +617,6 @@ class _CandidateList extends StatelessWidget {
                           Text(
                             '${candidate.roadId}  ${candidate.name.isNotEmpty ? candidate.name : '(unnamed road)'}',
                             style: const TextStyle(fontWeight: FontWeight.w600),
-                          ),
-                          Text(
-                            '${candidate.highway}  ${candidate.distanceMeters.toStringAsFixed(1)} m  ${candidate.connectivity}',
                           ),
                         ],
                       ),
