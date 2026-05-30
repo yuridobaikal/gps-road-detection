@@ -67,6 +67,9 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
   int _sequence = 0;
   int _lastAcceptedSequence = 0;
   int _lastMatchedRoadId = 0;
+  final Map<int, DateTime> _sentAtBySequence = {};
+  double? _lastRoundTripMs;
+  DateTime? _lastAcceptedAt;
   DateTime? _lastSentAt;
   Position? _lastSentPosition;
   String _status = 'Disconnected';
@@ -265,6 +268,7 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     }
 
     outgoing.add(request);
+    _sentAtBySequence[request.sequenceId.toInt()] = DateTime.now();
 
     setState(() {
       _lastSentAt = DateTime.now();
@@ -280,10 +284,20 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     }
 
     final best = response.hasBest() ? response.best : null;
+    final receivedAt = DateTime.now();
+    final sentAt = _sentAtBySequence.remove(responseSequence);
+    final roundTripMs = sentAt == null
+        ? null
+        : receivedAt.difference(sentAt).inMicroseconds / 1000.0;
+    _sentAtBySequence.removeWhere(
+      (sequence, _) => sequence < responseSequence - 20,
+    );
 
     setState(() {
       _lastAcceptedSequence = responseSequence;
       _lastResponse = response;
+      _lastRoundTripMs = roundTripMs;
+      _lastAcceptedAt = receivedAt;
       if (best != null) {
         _lastMatchedRoadId = best.roadId.toInt();
         if (response.confidence == 'high' || response.confidence == 'medium') {
@@ -337,6 +351,11 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
             tracking: _tracking,
             sequence: _sequence,
             acceptedSequence: _lastAcceptedSequence,
+            roundTripMs: _lastRoundTripMs,
+            backendProcessingMs: _lastResponse?.processingDurationMs,
+            responseAge: _lastAcceptedAt == null
+                ? null
+                : DateTime.now().difference(_lastAcceptedAt!),
           ),
           const SizedBox(height: 12),
           _RoadPanel(road: stableRoad, response: _lastResponse),
@@ -369,6 +388,9 @@ class _StatusPanel extends StatelessWidget {
     required this.tracking,
     required this.sequence,
     required this.acceptedSequence,
+    required this.roundTripMs,
+    required this.backendProcessingMs,
+    required this.responseAge,
   });
 
   final String status;
@@ -376,6 +398,9 @@ class _StatusPanel extends StatelessWidget {
   final bool tracking;
   final int sequence;
   final int acceptedSequence;
+  final double? roundTripMs;
+  final double? backendProcessingMs;
+  final Duration? responseAge;
 
   @override
   Widget build(BuildContext context) {
@@ -392,10 +417,31 @@ class _StatusPanel extends StatelessWidget {
           _Metric(label: 'GPS', value: tracking ? 'on' : 'off'),
           _Metric(label: 'Sent', value: '$sequence'),
           _Metric(label: 'Accepted', value: '$acceptedSequence'),
+          _Metric(label: 'Backend ms', value: _formatMs(backendProcessingMs)),
+          _Metric(label: 'Round trip', value: _formatMs(roundTripMs)),
+          _Metric(label: 'Age', value: _formatDuration(responseAge)),
         ],
       ),
     );
   }
+}
+
+String _formatMs(double? value) {
+  if (value == null || value <= 0) {
+    return '-';
+  }
+  return '${value.toStringAsFixed(1)} ms';
+}
+
+String _formatDuration(Duration? duration) {
+  if (duration == null) {
+    return '-';
+  }
+  final ms = duration.inMilliseconds;
+  if (ms < 1000) {
+    return '$ms ms';
+  }
+  return '${(ms / 1000).toStringAsFixed(1)} s';
 }
 
 class _RoadPanel extends StatelessWidget {

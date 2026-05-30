@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,14 +17,16 @@ import (
 	pb "github.com/yurido/gps-road-detection/backend/gen/roadmatcherpb"
 	"github.com/yurido/gps-road-detection/backend/internal/config"
 	"github.com/yurido/gps-road-detection/backend/internal/matching"
+	"github.com/yurido/gps-road-detection/backend/internal/triplog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
 
 type roadMatcherServer struct {
 	pb.UnimplementedRoadMatcherServer
-	matcher  matching.Matcher
-	logLevel string
+	matcher    matching.Matcher
+	logLevel   string
+	tripLogger *triplog.Logger
 }
 
 func (s *roadMatcherServer) MatchRoad(ctx context.Context, req *pb.MatchRoadRequest) (*pb.MatchRoadResponse, error) {
@@ -32,7 +35,11 @@ func (s *roadMatcherServer) MatchRoad(ctx context.Context, req *pb.MatchRoadRequ
 	}
 
 	s.logRequest("unary", req)
+	start := time.Now()
 	resp, err := s.matcher.Match(ctx, req)
+	duration := time.Since(start)
+	setProcessingDuration(resp, duration)
+	s.logTrip("unary", req, resp, duration, err)
 	if err != nil {
 		log.Printf("unary error sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
 		return nil, err
@@ -54,7 +61,11 @@ func (s *roadMatcherServer) StreamGps(stream pb.RoadMatcher_StreamGpsServer) err
 		}
 
 		s.logRequest("stream", req)
+		start := time.Now()
 		resp, err := s.matcher.Match(ctx, req)
+		duration := time.Since(start)
+		setProcessingDuration(resp, duration)
+		s.logTrip("stream", req, resp, duration, err)
 		if err != nil {
 			log.Printf("stream error sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
 			return err
@@ -68,6 +79,22 @@ func (s *roadMatcherServer) StreamGps(stream pb.RoadMatcher_StreamGpsServer) err
 
 func (s *roadMatcherServer) debugEnabled() bool {
 	return s.logLevel == "debug"
+}
+
+func setProcessingDuration(resp *pb.MatchRoadResponse, duration time.Duration) {
+	if resp == nil {
+		return
+	}
+	resp.ProcessingDurationMs = float64(duration.Microseconds()) / 1000.0
+}
+
+func (s *roadMatcherServer) logTrip(kind string, req *pb.MatchRoadRequest, resp *pb.MatchRoadResponse, duration time.Duration, matchErr error) {
+	if s.tripLogger == nil {
+		return
+	}
+	if err := s.tripLogger.LogMatch(kind, req, resp, duration, matchErr); err != nil {
+		log.Printf("write trip log sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
+	}
 }
 
 func (s *roadMatcherServer) logRequest(kind string, req *pb.MatchRoadRequest) {
@@ -101,7 +128,7 @@ func (s *roadMatcherServer) logResponse(kind string, resp *pb.MatchRoadResponse)
 		bestRoadID = best.GetRoadId()
 	}
 	log.Printf(
-		"%s response sequence=%d matched=%t confidence=%s best_road_id=%d best=%q candidates=%d",
+		"%s response sequence=%d matched=%t confidence=%s best_road_id=%d best=%q candidates=%d processing_ms=%.1f",
 		kind,
 		resp.GetSequenceId(),
 		resp.GetMatched(),
@@ -109,6 +136,7 @@ func (s *roadMatcherServer) logResponse(kind string, resp *pb.MatchRoadResponse)
 		bestRoadID,
 		bestName,
 		len(resp.GetCandidates()),
+		resp.GetProcessingDurationMs(),
 	)
 	for i, candidate := range resp.GetCandidates() {
 		log.Printf(
@@ -137,11 +165,33 @@ func main() {
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "PostgreSQL connection URL for postgis mode")
 	flag.StringVar(&cfg.RoadTable, "road-table", cfg.RoadTable, "road table: planet_osm_line, planet_osm_roads, or roads")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info or debug")
+	flag.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "common backend log file; empty disables file logging")
+	flag.BoolVar(&cfg.TripLogEnabled, "trip-log-enabled", cfg.TripLogEnabled, "write replayable trip JSONL logs")
+	flag.StringVar(&cfg.TripLogDir, "trip-log-dir", cfg.TripLogDir, "directory for trip JSONL logs")
+	flag.Int64Var(&cfg.TripLogMaxBytes, "trip-log-max-bytes", cfg.TripLogMaxBytes, "rotate and gzip trip logs after this many bytes")
 	flag.Parse()
+
+	commonLogFile, err := setupCommonLog(cfg.LogFile)
+	if err != nil {
+		log.Fatalf("setup common log file: %v", err)
+	}
+	if commonLogFile != nil {
+		defer commonLogFile.Close()
+	}
 
 	ctx := context.Background()
 	matcher, cleanup := buildMatcher(ctx, cfg)
 	defer cleanup()
+
+	var tripLogger *triplog.Logger
+	if cfg.TripLogEnabled {
+		var err error
+		tripLogger, err = triplog.New(cfg.TripLogDir, cfg.TripLogMaxBytes)
+		if err != nil {
+			log.Fatalf("create trip logger: %v", err)
+		}
+		defer tripLogger.Close()
+	}
 
 	listener, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
@@ -150,13 +200,14 @@ func main() {
 
 	server := grpc.NewServer()
 	pb.RegisterRoadMatcherServer(server, &roadMatcherServer{
-		matcher:  matcher,
-		logLevel: cfg.LogLevel,
+		matcher:    matcher,
+		logLevel:   cfg.LogLevel,
+		tripLogger: tripLogger,
 	})
 	reflection.Register(server)
 
 	go func() {
-		log.Printf("road matcher gRPC server listening on %s mode=%s road_table=%s log_level=%s", cfg.GRPCAddr, cfg.MatcherMode, cfg.RoadTable, cfg.LogLevel)
+		log.Printf("road matcher gRPC server listening on %s mode=%s road_table=%s log_level=%s log_file=%s trip_log_enabled=%t trip_log_dir=%s trip_log_max_bytes=%d", cfg.GRPCAddr, cfg.MatcherMode, cfg.RoadTable, cfg.LogLevel, cfg.LogFile, cfg.TripLogEnabled, cfg.TripLogDir, cfg.TripLogMaxBytes)
 		if err := server.Serve(listener); err != nil {
 			log.Fatalf("serve grpc: %v", err)
 		}
@@ -178,6 +229,23 @@ func main() {
 	case <-time.After(5 * time.Second):
 		server.Stop()
 	}
+}
+
+func setupCommonLog(path string) (*os.File, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+
+	log.SetOutput(file)
+	return file, nil
 }
 
 func buildMatcher(ctx context.Context, cfg config.Config) (matching.Matcher, func()) {

@@ -295,6 +295,7 @@ message MatchRoadResponse {
   string confidence = 3;
   optional RoadCandidate best = 4;
   repeated RoadCandidate candidates = 5;
+  double processing_duration_ms = 6;
 }
 
 message RoadCandidate {
@@ -504,9 +505,36 @@ device_state:{device_id}
 
 Candidate tile cache should have a short TTL because road data is static but user location changes quickly. Road geometry and connectivity caches can have a long TTL because OSM road data changes slowly after import.
 
+### 5.7 Trip Logging and Replay
+
+Backend should write replayable trip logs for every match request.
+
+Common backend logs should also be written to a normal `.log` file. These logs are for server lifecycle, configuration, debug summaries, PostGIS errors, gRPC errors, and shutdown messages. When file logging is enabled, common logs should go to the file only instead of also printing to the console.
+
+Keep common logs separate from trip logs:
+
+- Common log: human-readable `.log`
+- Trip log: replayable `.jsonl` / `.jsonl.gz`
+
+Each log line should contain:
+
+- schema version
+- log timestamp
+- request type: unary or stream
+- matcher duration
+- full GPS request, including history and last road ID
+- full backend response, including best road, candidates, scores, and geometry
+- error details, if matching failed
+
+Use JSON Lines so each GPS update is one independent record. Rotate the active trip log when it reaches 10MB, gzip the rotated file, and continue writing to a new active file.
+
+Replay tooling should read `.jsonl` and `.jsonl.gz` files, resend logged GPS requests to the backend, and compare replayed best road IDs against the original logged response.
+
 ## 6. Database Design
 
-The raw `planet_osm_line` table can be used at first, but the recommended design is to create a clean `roads` table for matching.
+The raw `planet_osm_line` table can be used for early testing, but the recommended real-trip design is to create a clean `roads` table for matching.
+
+The `roads` table should contain one LineString road segment per row. Do the expensive `ST_Dump` step once during setup, not on every GPS request.
 
 ### 6.1 Create Roads Table
 
@@ -548,7 +576,7 @@ WHERE highway IS NOT NULL
 
 ### 6.2 Add Primary Key
 
-If `osm_id` is not unique in your import, add a generated road ID.
+Use a generated `road_id` because `osm_id` is not guaranteed to be unique after splitting ways into LineString segments.
 
 ```sql
 ALTER TABLE roads
@@ -594,9 +622,9 @@ accuracy = 80m -> radius = 100m
 
 ### 7.2 Candidate Selection Logic
 
-The backend should query nearby drivable OSM road lines inside the GPS search radius.
+The backend should query nearby drivable road lines inside the GPS search radius.
 
-Current implementation can read directly from imported OSM tables such as `planet_osm_line` or from a normalized `roads` table later.
+Preferred runtime table is normalized `roads`. Raw imported OSM tables such as `planet_osm_line` remain supported for debugging, but they are slower because they may require per-request geometry dumping.
 
 Candidate data needed by the scorer:
 
@@ -872,6 +900,9 @@ Current GPS coordinate
 Accuracy
 Speed
 Heading
+Backend processing time
+Frontend round-trip time
+Displayed response age
 Matched road ID
 Matched road name
 Road type
@@ -1033,7 +1064,21 @@ Deliverables:
 - history score in backend
 - movement bearing calculation
 
-### Phase 7 — Advanced Sensors
+### Phase 7 — Trip Logging and Replay
+
+Goal:
+
+- Record real GPS trips.
+- Preserve backend response details for later analysis.
+- Replay logged trips against new matcher versions.
+
+Deliverables:
+
+- JSONL trip logs
+- gzip rotation every 10MB
+- replay command for `.jsonl` and `.jsonl.gz`
+
+### Phase 8 — Advanced Sensors
 
 Goal:
 
@@ -1091,6 +1136,8 @@ Python remains useful for prototyping the algorithm, replay tooling, and offline
 15. Do not allow old API responses to overwrite newer matching state.
 16. Support imported OSM tables such as `planet_osm_line` before requiring a cleaned `roads` table.
 17. Include road ID everywhere debug output shows a road name.
+18. Record replayable trip logs during real testing.
+19. Rotate and gzip trip logs so long drives do not create oversized files.
 
 ## 18. MVP Definition
 

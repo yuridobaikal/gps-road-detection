@@ -297,6 +297,7 @@ class MatchRoadResponse extends $pb.GeneratedMessage {
     $core.String? confidence,
     RoadCandidate? best,
     $core.Iterable<RoadCandidate>? candidates,
+    $core.double? processingDurationMs,
   }) {
     final result = create();
     if (sequenceId != null) result.sequenceId = sequenceId;
@@ -304,6 +305,8 @@ class MatchRoadResponse extends $pb.GeneratedMessage {
     if (confidence != null) result.confidence = confidence;
     if (best != null) result.best = best;
     if (candidates != null) result.candidates.addAll(candidates);
+    if (processingDurationMs != null)
+      result.processingDurationMs = processingDurationMs;
     return result;
   }
 
@@ -329,6 +332,7 @@ class MatchRoadResponse extends $pb.GeneratedMessage {
         subBuilder: RoadCandidate.create)
     ..pPM<RoadCandidate>(5, _omitFieldNames ? '' : 'candidates',
         subBuilder: RoadCandidate.create)
+    ..aD(6, _omitFieldNames ? '' : 'processingDurationMs')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -390,6 +394,15 @@ class MatchRoadResponse extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(5)
   $pb.PbList<RoadCandidate> get candidates => $_getList(4);
+
+  @$pb.TagNumber(6)
+  $core.double get processingDurationMs => $_getN(5);
+  @$pb.TagNumber(6)
+  set processingDurationMs($core.double value) => $_setDouble(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasProcessingDurationMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearProcessingDurationMs() => $_clearField(6);
 }
 
 class RoadCandidate extends $pb.GeneratedMessage {

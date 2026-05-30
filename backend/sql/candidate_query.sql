@@ -13,31 +13,18 @@ road_source AS (
         way AS geom
     FROM planet_osm_line
 ),
-last_roads AS (
-    SELECT
-        dumped.geom
-    FROM road_source r
-    CROSS JOIN LATERAL ST_Dump(r.geom) AS dumped(path, geom)
-    WHERE r.road_id = :last_road_id
-      AND GeometryType(dumped.geom) = 'LINESTRING'
-      AND ST_IsValid(dumped.geom)
-      AND NOT ST_IsEmpty(dumped.geom)
-),
-candidate_roads AS (
+filtered_roads AS (
     SELECT
         r.road_id,
         r.osm_id,
         COALESCE(r.name, '') AS name,
         COALESCE(r.highway, '') AS highway,
         COALESCE(r.oneway, '') AS oneway,
-        dumped.geom,
-        ST_Distance(dumped.geom, p.gps_geom) AS distance_meters,
-        p.search_radius,
-        ST_LineLocatePoint(dumped.geom, p.gps_geom) AS line_fraction,
-        NULLIF(ST_Length(dumped.geom), 0) AS geom_length
+        r.geom,
+        p.gps_geom,
+        p.search_radius
     FROM road_source r
     CROSS JOIN params p
-    CROSS JOIN LATERAL ST_Dump(r.geom) AS dumped(path, geom)
     WHERE r.highway IS NOT NULL
       AND r.highway IN (
           'motorway',
@@ -55,10 +42,39 @@ candidate_roads AS (
           'secondary_link',
           'tertiary_link'
       )
+      AND r.geom && ST_Expand(p.gps_geom, p.search_radius)
+      AND ST_DWithin(r.geom, p.gps_geom, p.search_radius)
+),
+last_roads AS (
+    SELECT
+        dumped.geom
+    FROM road_source r
+    CROSS JOIN LATERAL ST_Dump(r.geom) AS dumped(path, geom)
+    WHERE :last_road_id <> 0
+      AND r.road_id = :last_road_id
       AND GeometryType(dumped.geom) = 'LINESTRING'
       AND ST_IsValid(dumped.geom)
       AND NOT ST_IsEmpty(dumped.geom)
-      AND ST_DWithin(dumped.geom, p.gps_geom, p.search_radius)
+),
+candidate_roads AS (
+    SELECT
+        r.road_id,
+        r.osm_id,
+        r.name,
+        r.highway,
+        r.oneway,
+        dumped.geom,
+        ST_Distance(dumped.geom, r.gps_geom) AS distance_meters,
+        r.search_radius,
+        ST_LineLocatePoint(dumped.geom, r.gps_geom) AS line_fraction,
+        NULLIF(ST_Length(dumped.geom), 0) AS geom_length
+    FROM filtered_roads r
+    CROSS JOIN LATERAL ST_Dump(r.geom) AS dumped(path, geom)
+    WHERE GeometryType(dumped.geom) = 'LINESTRING'
+      AND ST_IsValid(dumped.geom)
+      AND NOT ST_IsEmpty(dumped.geom)
+      AND dumped.geom && ST_Expand(r.gps_geom, r.search_radius)
+      AND ST_DWithin(dumped.geom, r.gps_geom, r.search_radius)
 ),
 scored AS (
     SELECT

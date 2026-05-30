@@ -1,0 +1,19 @@
+2026/05/30 00:17:00 road matcher gRPC server listening on :50051 mode=postgis road_table=planet_osm_line log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 00:19:05 shutting down road matcher gRPC server
+2026/05/30 00:19:09 road matcher gRPC server listening on :50051 mode=postgis road_table=planet_osm_line log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 00:19:18 shutting down road matcher gRPC server
+2026/05/30 00:28:25 road matcher gRPC server listening on :50051 mode=postgis road_table=planet_osm_line log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 00:35:36 shutting down road matcher gRPC server
+2026/05/30 00:35:41 stream error sequence=18 device=dev-flutter: iterate postgis candidates: context canceled
+2026/05/30 00:37:47 road matcher gRPC server listening on :50051 mode=postgis road_table=planet_osm_line log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 00:39:09 shutting down road matcher gRPC server
+2026/05/30 00:39:14 stream error sequence=72 device=dev-flutter: iterate postgis candidates: context canceled
+2026/05/30 00:39:57 road matcher gRPC server listening on :50051 mode=postgis road_table=planet_osm_line log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 00:41:10 shutting down road matcher gRPC server
+2026/05/30 00:41:15 stream error sequence=100 device=dev-flutter: iterate postgis candidates: context canceled
+2026/05/30 22:10:45 road matcher gRPC server listening on :50051 mode=postgis road_table=planet_osm_line log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 22:56:17 shutting down road matcher gRPC server
+2026/05/30 23:00:28 road matcher gRPC server listening on :50051 mode=postgis road_table=roads log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 23:03:26 shutting down road matcher gRPC server
+2026/05/30 23:06:18 road matcher gRPC server listening on :50051 mode=postgis road_table=roads log_level=info log_file=logs/road-matcher.log trip_log_enabled=true trip_log_dir=logs/trips trip_log_max_bytes=10485760
+2026/05/30 23:13:38 shutting down road matcher gRPC server

@@ -90,6 +90,13 @@ const MatchRoadResponse$json = {
       '6': '.roadmatcher.v1.RoadCandidate',
       '10': 'candidates'
     },
+    {
+      '1': 'processing_duration_ms',
+      '3': 6,
+      '4': 1,
+      '5': 1,
+      '10': 'processingDurationMs'
+    },
   ],
 };
 
@@ -99,7 +106,8 @@ final $typed_data.Uint8List matchRoadResponseDescriptor = $convert.base64Decode(
     'dtYXRjaGVkGAIgASgIUgdtYXRjaGVkEh4KCmNvbmZpZGVuY2UYAyABKAlSCmNvbmZpZGVuY2US'
     'MQoEYmVzdBgEIAEoCzIdLnJvYWRtYXRjaGVyLnYxLlJvYWRDYW5kaWRhdGVSBGJlc3QSPQoKY2'
     'FuZGlkYXRlcxgFIAMoCzIdLnJvYWRtYXRjaGVyLnYxLlJvYWRDYW5kaWRhdGVSCmNhbmRpZGF0'
-    'ZXM=');
+    'ZXMSNAoWcHJvY2Vzc2luZ19kdXJhdGlvbl9tcxgGIAEoAVIUcHJvY2Vzc2luZ0R1cmF0aW9uTX'
+    'M=');
 
 @$core.Deprecated('Use roadCandidateDescriptor instead')
 const RoadCandidate$json = {

@@ -37,6 +37,7 @@ message MatchRoadResponse {
   string confidence = 3;
   RoadCandidate best = 4;
   repeated RoadCandidate candidates = 5;
+  double processing_duration_ms = 6;
 }
 
 message RoadCandidate {

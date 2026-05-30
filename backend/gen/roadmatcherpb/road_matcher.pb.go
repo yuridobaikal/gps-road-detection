@@ -222,14 +222,15 @@ func (x *GpsHistoryPoint) GetHeading() float64 {
 }
 
 type MatchRoadResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SequenceId    uint64                 `protobuf:"varint,1,opt,name=sequence_id,json=sequenceId,proto3" json:"sequence_id,omitempty"`
-	Matched       bool                   `protobuf:"varint,2,opt,name=matched,proto3" json:"matched,omitempty"`
-	Confidence    string                 `protobuf:"bytes,3,opt,name=confidence,proto3" json:"confidence,omitempty"`
-	Best          *RoadCandidate         `protobuf:"bytes,4,opt,name=best,proto3" json:"best,omitempty"`
-	Candidates    []*RoadCandidate       `protobuf:"bytes,5,rep,name=candidates,proto3" json:"candidates,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	SequenceId           uint64                 `protobuf:"varint,1,opt,name=sequence_id,json=sequenceId,proto3" json:"sequence_id,omitempty"`
+	Matched              bool                   `protobuf:"varint,2,opt,name=matched,proto3" json:"matched,omitempty"`
+	Confidence           string                 `protobuf:"bytes,3,opt,name=confidence,proto3" json:"confidence,omitempty"`
+	Best                 *RoadCandidate         `protobuf:"bytes,4,opt,name=best,proto3" json:"best,omitempty"`
+	Candidates           []*RoadCandidate       `protobuf:"bytes,5,rep,name=candidates,proto3" json:"candidates,omitempty"`
+	ProcessingDurationMs float64                `protobuf:"fixed64,6,opt,name=processing_duration_ms,json=processingDurationMs,proto3" json:"processing_duration_ms,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *MatchRoadResponse) Reset() {
@@ -295,6 +296,13 @@ func (x *MatchRoadResponse) GetCandidates() []*RoadCandidate {
 		return x.Candidates
 	}
 	return nil
+}
+
+func (x *MatchRoadResponse) GetProcessingDurationMs() float64 {
+	if x != nil {
+		return x.ProcessingDurationMs
+	}
+	return 0
 }
 
 type RoadCandidate struct {
@@ -514,7 +522,7 @@ const file_road_matcher_proto_rawDesc = "" +
 	"\x03lon\x18\x03 \x01(\x01R\x03lon\x12\x1a\n" +
 	"\baccuracy\x18\x04 \x01(\x01R\baccuracy\x12\x14\n" +
 	"\x05speed\x18\x05 \x01(\x01R\x05speed\x12\x18\n" +
-	"\aheading\x18\x06 \x01(\x01R\aheading\"\xe0\x01\n" +
+	"\aheading\x18\x06 \x01(\x01R\aheading\"\x96\x02\n" +
 	"\x11MatchRoadResponse\x12\x1f\n" +
 	"\vsequence_id\x18\x01 \x01(\x04R\n" +
 	"sequenceId\x12\x18\n" +
@@ -525,7 +533,8 @@ const file_road_matcher_proto_rawDesc = "" +
 	"\x04best\x18\x04 \x01(\v2\x1d.roadmatcher.v1.RoadCandidateR\x04best\x12=\n" +
 	"\n" +
 	"candidates\x18\x05 \x03(\v2\x1d.roadmatcher.v1.RoadCandidateR\n" +
-	"candidates\"\xba\x03\n" +
+	"candidates\x124\n" +
+	"\x16processing_duration_ms\x18\x06 \x01(\x01R\x14processingDurationMs\"\xba\x03\n" +
 	"\rRoadCandidate\x12\x17\n" +
 	"\aroad_id\x18\x01 \x01(\x03R\x06roadId\x12\x15\n" +
 	"\x06osm_id\x18\x02 \x01(\x03R\x05osmId\x12\x12\n" +
