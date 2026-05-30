@@ -3,6 +3,7 @@ package matching
 import (
 	"context"
 	"math"
+	"time"
 
 	pb "github.com/yurido/gps-road-detection/backend/gen/roadmatcherpb"
 )
@@ -28,6 +29,10 @@ func responseCandidates(candidates []*pb.RoadCandidate) []*pb.RoadCandidate {
 		trimmed = append(trimmed, responseCandidate(candidate))
 	}
 	return trimmed
+}
+
+func elapsedMs(start time.Time) float64 {
+	return float64(time.Since(start).Microseconds()) / 1000.0
 }
 
 func clamp(v, min, max float64) float64 {

@@ -36,15 +36,20 @@ func (s *roadMatcherServer) MatchRoad(ctx context.Context, req *pb.MatchRoadRequ
 
 	s.logRequest("unary", req)
 	start := time.Now()
+	s.debugLogf("unary match start sequence=%d device=%s", req.GetSequenceId(), req.GetDeviceId())
 	resp, err := s.matcher.Match(ctx, req)
 	duration := time.Since(start)
 	setProcessingDuration(resp, duration)
+	s.debugLogf("unary match done sequence=%d device=%s match_ms=%.1f err=%v", req.GetSequenceId(), req.GetDeviceId(), durationMs(duration), err)
+	tripStart := time.Now()
 	s.logTrip("unary", req, resp, duration, err)
+	s.debugLogf("unary trip log done sequence=%d device=%s trip_log_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(tripStart))
 	if err != nil {
 		log.Printf("unary error sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
 		return nil, err
 	}
 	s.logResponse("unary", resp)
+	s.debugLogf("unary response ready sequence=%d device=%s total_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(start))
 	return resp, nil
 }
 
@@ -60,25 +65,49 @@ func (s *roadMatcherServer) StreamGps(stream pb.RoadMatcher_StreamGpsServer) err
 			return err
 		}
 
+		receivedAt := time.Now()
+		s.debugLogf("stream request received sequence=%d device=%s", req.GetSequenceId(), req.GetDeviceId())
 		s.logRequest("stream", req)
 		start := time.Now()
+		s.debugLogf("stream match start sequence=%d device=%s receive_to_match_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(receivedAt))
 		resp, err := s.matcher.Match(ctx, req)
 		duration := time.Since(start)
 		setProcessingDuration(resp, duration)
+		s.debugLogf("stream match done sequence=%d device=%s match_ms=%.1f err=%v", req.GetSequenceId(), req.GetDeviceId(), durationMs(duration), err)
+		tripStart := time.Now()
 		s.logTrip("stream", req, resp, duration, err)
+		s.debugLogf("stream trip log done sequence=%d device=%s trip_log_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(tripStart))
 		if err != nil {
 			log.Printf("stream error sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
 			return err
 		}
+		sendStart := time.Now()
+		s.debugLogf("stream send start sequence=%d device=%s", req.GetSequenceId(), req.GetDeviceId())
 		if err := stream.Send(resp); err != nil {
 			return err
 		}
+		s.debugLogf("stream send done sequence=%d device=%s send_ms=%.1f total_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(sendStart), elapsedMs(receivedAt))
 		s.logResponse("stream", resp)
 	}
 }
 
 func (s *roadMatcherServer) debugEnabled() bool {
 	return s.logLevel == "debug"
+}
+
+func (s *roadMatcherServer) debugLogf(format string, args ...any) {
+	if !s.debugEnabled() {
+		return
+	}
+	log.Printf(format, args...)
+}
+
+func elapsedMs(start time.Time) float64 {
+	return float64(time.Since(start).Microseconds()) / 1000.0
+}
+
+func durationMs(duration time.Duration) float64 {
+	return float64(duration.Microseconds()) / 1000.0
 }
 
 func setProcessingDuration(resp *pb.MatchRoadResponse, duration time.Duration) {
@@ -263,7 +292,7 @@ func buildMatcher(ctx context.Context, cfg config.Config) (matching.Matcher, fun
 			log.Fatalf("ping postgis database: %v", err)
 		}
 
-		matcher, err := matching.NewPostGISMatcher(pool, cfg.RoadTable)
+		matcher, err := matching.NewPostGISMatcher(pool, cfg.RoadTable, cfg.LogLevel == "debug")
 		if err != nil {
 			pool.Close()
 			log.Fatal(err)

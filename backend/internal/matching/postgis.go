@@ -3,8 +3,10 @@ package matching
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	pb "github.com/yurido/gps-road-detection/backend/gen/roadmatcherpb"
@@ -237,9 +239,10 @@ LIMIT ($4::integer * 2);
 type PostGISMatcher struct {
 	pool         *pgxpool.Pool
 	candidateSQL string
+	debug        bool
 }
 
-func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string) (*PostGISMatcher, error) {
+func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string, debug bool) (*PostGISMatcher, error) {
 	sourceSQL, err := roadSourceSQL(roadTable)
 	if err != nil {
 		return nil, err
@@ -253,6 +256,7 @@ func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string) (*PostGISMatcher, e
 	return &PostGISMatcher{
 		pool:         pool,
 		candidateSQL: fmt.Sprintf(template, sourceSQL),
+		debug:        debug,
 	}, nil
 }
 
@@ -295,16 +299,25 @@ func (m *PostGISMatcher) Match(ctx context.Context, req *pb.MatchRoadRequest) (*
 }
 
 func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadRequest, limit int32) ([]*pb.RoadCandidate, error) {
+	totalStart := time.Now()
+	m.debugLogf("postgis queryCandidates start sequence=%d device=%s lat=%.6f lon=%.6f accuracy=%.1f last_road_id=%d limit=%d", req.GetSequenceId(), req.GetDeviceId(), req.GetLat(), req.GetLon(), req.GetAccuracy(), req.GetLastRoadId(), limit)
+
+	queryStart := time.Now()
+	m.debugLogf("postgis query start sequence=%d", req.GetSequenceId())
 	rows, err := m.pool.Query(ctx, m.candidateSQL, req.GetLon(), req.GetLat(), req.GetAccuracy(), limit, req.GetLastRoadId())
 	if err != nil {
 		return nil, fmt.Errorf("query postgis candidates: %w", err)
 	}
 	defer rows.Close()
+	m.debugLogf("postgis query rows opened sequence=%d query_open_ms=%.1f", req.GetSequenceId(), elapsedMs(queryStart))
 
 	radius := searchRadius(req.GetAccuracy())
 	candidates := make([]*pb.RoadCandidate, 0, limit)
+	scanStart := time.Now()
+	scannedRows := 0
 
 	for rows.Next() {
+		scannedRows++
 		var (
 			candidate     pb.RoadCandidate
 			distanceScore float64
@@ -345,7 +358,9 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate postgis candidates: %w", err)
 	}
+	m.debugLogf("postgis scan done sequence=%d scanned_rows=%d accepted_candidates=%d scan_ms=%.1f", req.GetSequenceId(), scannedRows, len(candidates), elapsedMs(scanStart))
 
+	sortStart := time.Now()
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Score == candidates[j].Score {
 			return candidates[i].DistanceMeters < candidates[j].DistanceMeters
@@ -355,8 +370,16 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 	if len(candidates) > int(limit) {
 		candidates = candidates[:limit]
 	}
+	m.debugLogf("postgis sort/trim done sequence=%d returned_candidates=%d sort_ms=%.1f total_ms=%.1f", req.GetSequenceId(), len(candidates), elapsedMs(sortStart), elapsedMs(totalStart))
 
 	return candidates, nil
+}
+
+func (m *PostGISMatcher) debugLogf(format string, args ...any) {
+	if !m.debug {
+		return
+	}
+	log.Printf(format, args...)
 }
 
 func roadSourceSQL(roadTable string) (string, error) {
