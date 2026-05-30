@@ -210,7 +210,46 @@ gRPC is preferred for the real-trip MVP because:
 
 REST/JSON can still be added later as a debug or replay endpoint, but it should not be the primary mobile matching path.
 
-### 5.1 gRPC Service
+### 5.1 Backend Configuration
+
+Backend should load runtime settings from a config file first, with environment variables and command flags available only as overrides.
+
+Recommended local config path:
+
+```text
+backend/config.local.json
+```
+
+Example:
+
+```json
+{
+  "grpc_addr": ":50051",
+  "matcher_mode": "postgis",
+  "database_url": "postgres://postgres:postgres@127.0.0.1:5432/gps_roads?sslmode=disable",
+  "road_table": "roads",
+  "log_level": "info",
+  "log_file": "logs/road-matcher.log",
+  "trip_log_enabled": true,
+  "trip_log_dir": "logs/trips",
+  "trip_log_max_bytes": 10485760
+}
+```
+
+Config merge order:
+
+1. Built-in defaults
+2. Config file
+3. Environment variables
+4. Command flags
+
+Run backend:
+
+```text
+go run ./cmd/road-matcher -config config.local.json
+```
+
+### 5.2 gRPC Service
 
 ```proto
 service RoadMatcher {
@@ -228,7 +267,7 @@ Use `StreamGps` as the primary live-trip MVP method. The app should open one lon
 
 Keep unary `MatchRoad` as a fallback/debug method for one-off checks, replay tooling, backend tests, and easier diagnostics.
 
-### 5.2 Request Message
+### 5.3 Request Message
 
 ```proto
 message MatchRoadRequest {
@@ -286,7 +325,7 @@ Example logical payload:
 
 The frontend must include either a monotonically increasing `sequence_id` or another equivalent request ordering value. The app should ignore stale backend responses that arrive after a newer GPS update or newer matching response.
 
-### 5.3 Response Message
+### 5.4 Response Message
 
 ```proto
 message MatchRoadResponse {
@@ -337,7 +376,7 @@ Example logical response:
 }
 ```
 
-### 5.4 Stream Message Interval Policy
+### 5.5 Stream Message Interval Policy
 
 Backend matching messages should be speed-aware. The app should update local GPS UI on every location update, but it should throttle gRPC stream messages based on movement.
 
@@ -391,7 +430,7 @@ Rules:
 - The frontend must not let an older response overwrite a newer displayed match.
 - Backend target matching response time should be around 100-300 ms for normal messages.
 
-### 5.5 Frontend Immediate Result Strategy
+### 5.6 Frontend Immediate Result Strategy
 
 For real trips, the frontend should not wait for the backend before showing road status. It should maintain local state:
 
@@ -416,7 +455,7 @@ On each GPS update:
 
 This allows immediate frontend behavior during fast driving while keeping the backend as the authoritative matcher.
 
-### 5.6 Caching Strategy
+### 5.7 Caching Strategy
 
 Caching is required for the real-trip MVP. Backend caching is the first priority. Frontend caching is required for immediate display and smooth behavior between backend responses.
 
@@ -459,7 +498,7 @@ device_state:{device_id}
 
 Candidate tile cache should have a short TTL because road data is static but user location changes quickly. Road geometry and connectivity caches can have a long TTL because OSM road data changes slowly after import.
 
-### 5.7 Trip Logging and Replay
+### 5.8 Trip Logging and Replay
 
 Backend should write replayable trip logs for every match request.
 

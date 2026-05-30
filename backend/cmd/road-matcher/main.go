@@ -151,7 +151,12 @@ func (s *roadMatcherServer) logResponse(kind string, resp *pb.MatchRoadResponse)
 }
 
 func main() {
-	cfg := config.FromEnv()
+	configPath, configExplicit := config.PathFromArgs(os.Args[1:])
+	cfg, err := config.Load(configPath, configExplicit)
+	if err != nil {
+		log.Fatal(err)
+	}
+	flag.StringVar(&configPath, "config", configPath, "config file path")
 	flag.StringVar(&cfg.GRPCAddr, "addr", cfg.GRPCAddr, "gRPC listen address")
 	flag.StringVar(&cfg.MatcherMode, "matcher-mode", cfg.MatcherMode, "matcher mode: mock or postgis")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "PostgreSQL connection URL for postgis mode")
@@ -199,7 +204,7 @@ func main() {
 	reflection.Register(server)
 
 	go func() {
-		log.Printf("road matcher gRPC server listening on %s mode=%s road_table=%s log_level=%s log_file=%s trip_log_enabled=%t trip_log_dir=%s trip_log_max_bytes=%d", cfg.GRPCAddr, cfg.MatcherMode, cfg.RoadTable, cfg.LogLevel, cfg.LogFile, cfg.TripLogEnabled, cfg.TripLogDir, cfg.TripLogMaxBytes)
+		log.Printf("road matcher gRPC server listening on %s config=%s mode=%s road_table=%s log_level=%s log_file=%s trip_log_enabled=%t trip_log_dir=%s trip_log_max_bytes=%d", cfg.GRPCAddr, configPath, cfg.MatcherMode, cfg.RoadTable, cfg.LogLevel, cfg.LogFile, cfg.TripLogEnabled, cfg.TripLogDir, cfg.TripLogMaxBytes)
 		if err := server.Serve(listener); err != nil {
 			log.Fatalf("serve grpc: %v", err)
 		}

@@ -1,0 +1,11 @@
+{
+  "grpc_addr": ":50051",
+  "matcher_mode": "postgis",
+  "database_url": "postgres://postgres:postgres@127.0.0.1:5432/gps_roads?sslmode=disable",
+  "road_table": "roads",
+  "log_level": "info",
+  "log_file": "logs/road-matcher.log",
+  "trip_log_enabled": true,
+  "trip_log_dir": "logs/trips",
+  "trip_log_max_bytes": 10485760
+}

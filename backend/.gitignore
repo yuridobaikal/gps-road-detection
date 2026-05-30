@@ -1,2 +1,3 @@
 .gocache/
 .gomodcache/
+config.local.json
