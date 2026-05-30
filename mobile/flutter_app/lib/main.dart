@@ -55,6 +55,9 @@ class RoadDetectorScreen extends StatefulWidget {
 
 class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
   final List<GpsHistoryPoint> _history = [];
+  late final TextEditingController _hostController;
+  late final TextEditingController _portController;
+  late final TextEditingController _deviceIdController;
   StreamController<MatchRoadRequest>? _outgoing;
 
   ClientChannel? _channel;
@@ -74,8 +77,17 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
   Position? _lastSentPosition;
   String _status = 'Disconnected';
   bool _tracking = false;
+  String? _connectedBackend;
 
-  String get _backendHost {
+  @override
+  void initState() {
+    super.initState();
+    _hostController = TextEditingController(text: _initialBackendHost());
+    _portController = TextEditingController(text: '$_backendPort');
+    _deviceIdController = TextEditingController(text: _deviceId);
+  }
+
+  String _initialBackendHost() {
     if (_defaultBackendHost != '127.0.0.1') {
       return _defaultBackendHost;
     }
@@ -85,22 +97,38 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     return _defaultBackendHost;
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _connectStream();
+  String get _selectedBackendHost => _hostController.text.trim();
+
+  int? get _selectedBackendPort {
+    final port = int.tryParse(_portController.text.trim());
+    if (port == null || port <= 0 || port > 65535) {
+      return null;
+    }
+    return port;
   }
 
-  Future<void> _connectStream() async {
+  String get _selectedDeviceId {
+    final value = _deviceIdController.text.trim();
+    return value.isEmpty ? _deviceId : value;
+  }
+
+  Future<bool> _connectStream() async {
     await _matchSubscription?.cancel();
     await _channel?.shutdown();
     await _outgoing?.close();
 
+    final host = _selectedBackendHost;
+    final port = _selectedBackendPort;
+    if (host.isEmpty || port == null) {
+      setState(() => _status = 'Invalid backend host or port');
+      return false;
+    }
+
     final outgoing = StreamController<MatchRoadRequest>();
 
     final channel = ClientChannel(
-      _backendHost,
-      port: _backendPort,
+      host,
+      port: port,
       options: const ChannelOptions(credentials: ChannelCredentials.insecure()),
     );
 
@@ -124,11 +152,18 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     setState(() {
       _outgoing = outgoing;
       _channel = channel;
-      _status = 'Stream opened to $_backendHost:$_backendPort';
+      _connectedBackend = '$host:$port';
+      _status = 'Stream opened to $_connectedBackend';
     });
+    return true;
   }
 
   Future<void> _startTracking() async {
+    final connected = await _connectStream();
+    if (!connected) {
+      return;
+    }
+
     final allowed = await _requestLocationPermission();
     if (!allowed) {
       setState(() => _status = 'Location permission unavailable');
@@ -249,7 +284,7 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
 
   void _sendPosition(Position position) {
     final request = MatchRoadRequest(
-      deviceId: _deviceId,
+      deviceId: _selectedDeviceId,
       sequenceId: Int64(++_sequence),
       timestamp: DateTime.now().toUtc().toIso8601String(),
       lat: position.latitude,
@@ -310,9 +345,16 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
 
   Future<void> _stopTracking() async {
     await _gpsSubscription?.cancel();
+    await _matchSubscription?.cancel();
+    await _outgoing?.close();
+    await _channel?.shutdown();
     _gpsSubscription = null;
+    _matchSubscription = null;
+    _outgoing = null;
+    _channel = null;
     setState(() {
       _tracking = false;
+      _connectedBackend = null;
       _status = 'GPS tracking stopped';
     });
   }
@@ -323,6 +365,9 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     _matchSubscription?.cancel();
     _outgoing?.close();
     _channel?.shutdown();
+    _hostController.dispose();
+    _portController.dispose();
+    _deviceIdController.dispose();
     super.dispose();
   }
 
@@ -337,7 +382,7 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
         actions: [
           IconButton(
             tooltip: 'Reconnect',
-            onPressed: _connectStream,
+            onPressed: _tracking ? null : _connectStream,
             icon: const Icon(Icons.sync),
           ),
         ],
@@ -345,9 +390,19 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          _BackendConfigPanel(
+            hostController: _hostController,
+            portController: _portController,
+            deviceIdController: _deviceIdController,
+            enabled: !_tracking,
+            onReconnect: _tracking ? null : _connectStream,
+          ),
+          const SizedBox(height: 12),
           _StatusPanel(
             status: _status,
-            backend: '$_backendHost:$_backendPort',
+            backend:
+                _connectedBackend ??
+                '$_selectedBackendHost:${_selectedBackendPort ?? '-'}',
             tracking: _tracking,
             sequence: _sequence,
             acceptedSequence: _lastAcceptedSequence,
@@ -420,6 +475,88 @@ class _StatusPanel extends StatelessWidget {
           _Metric(label: 'Backend ms', value: _formatMs(backendProcessingMs)),
           _Metric(label: 'Round trip', value: _formatMs(roundTripMs)),
           _Metric(label: 'Age', value: _formatDuration(responseAge)),
+        ],
+      ),
+    );
+  }
+}
+
+class _BackendConfigPanel extends StatelessWidget {
+  const _BackendConfigPanel({
+    required this.hostController,
+    required this.portController,
+    required this.deviceIdController,
+    required this.enabled,
+    required this.onReconnect,
+  });
+
+  final TextEditingController hostController;
+  final TextEditingController portController;
+  final TextEditingController deviceIdController;
+  final bool enabled;
+  final Future<bool> Function()? onReconnect;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: _PanelTitle(icon: Icons.dns, text: 'Backend'),
+              ),
+              IconButton(
+                tooltip: 'Reconnect',
+                onPressed: onReconnect,
+                icon: const Icon(Icons.sync),
+              ),
+            ],
+          ),
+          TextField(
+            controller: hostController,
+            enabled: enabled,
+            decoration: const InputDecoration(
+              labelText: 'Host',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            keyboardType: TextInputType.url,
+            textInputAction: TextInputAction.next,
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: portController,
+                  enabled: enabled,
+                  decoration: const InputDecoration(
+                    labelText: 'Port',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: TextField(
+                  controller: deviceIdController,
+                  enabled: enabled,
+                  decoration: const InputDecoration(
+                    labelText: 'Device ID',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  textInputAction: TextInputAction.done,
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
