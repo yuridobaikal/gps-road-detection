@@ -48,9 +48,10 @@ func (s *roadMatcherServer) MatchRoad(ctx context.Context, req *pb.MatchRoadRequ
 		log.Printf("unary error sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
 		return nil, err
 	}
-	s.logResponse("unary", resp)
+	clientResp := clientResponse(resp)
+	s.logResponse("unary", clientResp)
 	s.debugLogf("unary response ready sequence=%d device=%s total_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(start))
-	return resp, nil
+	return clientResp, nil
 }
 
 func (s *roadMatcherServer) StreamGps(stream pb.RoadMatcher_StreamGpsServer) error {
@@ -81,13 +82,14 @@ func (s *roadMatcherServer) StreamGps(stream pb.RoadMatcher_StreamGpsServer) err
 			log.Printf("stream error sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
 			return err
 		}
+		clientResp := clientResponse(resp)
 		sendStart := time.Now()
 		s.debugLogf("stream send start sequence=%d device=%s", req.GetSequenceId(), req.GetDeviceId())
-		if err := stream.Send(resp); err != nil {
+		if err := stream.Send(clientResp); err != nil {
 			return err
 		}
 		s.debugLogf("stream send done sequence=%d device=%s send_ms=%.1f total_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(sendStart), elapsedMs(receivedAt))
-		s.logResponse("stream", resp)
+		s.logResponse("stream", clientResp)
 	}
 }
 
@@ -115,6 +117,39 @@ func setProcessingDuration(resp *pb.MatchRoadResponse, duration time.Duration) {
 		return
 	}
 	resp.ProcessingDurationMs = float64(duration.Microseconds()) / 1000.0
+}
+
+func clientResponse(resp *pb.MatchRoadResponse) *pb.MatchRoadResponse {
+	if resp == nil {
+		return nil
+	}
+	return &pb.MatchRoadResponse{
+		SequenceId:           resp.GetSequenceId(),
+		Matched:              resp.GetMatched(),
+		Confidence:           resp.GetConfidence(),
+		Best:                 clientCandidate(resp.GetBest()),
+		Candidates:           clientCandidates(resp.GetCandidates()),
+		ProcessingDurationMs: resp.GetProcessingDurationMs(),
+	}
+}
+
+func clientCandidate(candidate *pb.RoadCandidate) *pb.RoadCandidate {
+	if candidate == nil {
+		return nil
+	}
+	return &pb.RoadCandidate{
+		RoadId: candidate.GetRoadId(),
+		Name:   candidate.GetName(),
+		Score:  candidate.GetScore(),
+	}
+}
+
+func clientCandidates(candidates []*pb.RoadCandidate) []*pb.RoadCandidate {
+	trimmed := make([]*pb.RoadCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		trimmed = append(trimmed, clientCandidate(candidate))
+	}
+	return trimmed
 }
 
 func (s *roadMatcherServer) logTrip(kind string, req *pb.MatchRoadRequest, resp *pb.MatchRoadResponse, duration time.Duration, matchErr error) {

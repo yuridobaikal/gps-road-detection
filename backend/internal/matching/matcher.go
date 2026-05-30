@@ -12,25 +12,6 @@ type Matcher interface {
 	Match(ctx context.Context, req *pb.MatchRoadRequest) (*pb.MatchRoadResponse, error)
 }
 
-func responseCandidate(candidate *pb.RoadCandidate) *pb.RoadCandidate {
-	if candidate == nil {
-		return nil
-	}
-	return &pb.RoadCandidate{
-		RoadId: candidate.GetRoadId(),
-		Name:   candidate.GetName(),
-		Score:  candidate.GetScore(),
-	}
-}
-
-func responseCandidates(candidates []*pb.RoadCandidate) []*pb.RoadCandidate {
-	trimmed := make([]*pb.RoadCandidate, 0, len(candidates))
-	for _, candidate := range candidates {
-		trimmed = append(trimmed, responseCandidate(candidate))
-	}
-	return trimmed
-}
-
 func elapsedMs(start time.Time) float64 {
 	return float64(time.Since(start).Microseconds()) / 1000.0
 }

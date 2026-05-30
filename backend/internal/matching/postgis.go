@@ -382,8 +382,8 @@ func (m *PostGISMatcher) Match(ctx context.Context, req *pb.MatchRoadRequest) (*
 		SequenceId: req.GetSequenceId(),
 		Matched:    true,
 		Confidence: confidence(candidates[0].Score, secondScore),
-		Best:       responseCandidate(candidates[0]),
-		Candidates: responseCandidates(candidates),
+		Best:       candidates[0],
+		Candidates: candidates,
 	}, nil
 }
 

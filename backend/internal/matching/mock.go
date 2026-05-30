@@ -70,8 +70,8 @@ func (m *MockMatcher) Match(ctx context.Context, req *pb.MatchRoadRequest) (*pb.
 		SequenceId: req.GetSequenceId(),
 		Matched:    true,
 		Confidence: confidence(best.Score, second.Score),
-		Best:       responseCandidate(best),
-		Candidates: responseCandidates([]*pb.RoadCandidate{best, second}),
+		Best:       best,
+		Candidates: []*pb.RoadCandidate{best, second},
 	}, nil
 }
 
