@@ -129,21 +129,11 @@ ORDER BY distance_score DESC, distance_meters ASC
 LIMIT ($4::integer * 2);
 `
 
-const candidateSQLTemplateRoads = `
+const candidateSQLRoadsBase = `
 WITH params AS (
     SELECT
         ST_Transform(ST_SetSRID(ST_MakePoint($1, $2), 4326), 3857) AS gps_geom,
         LEAST(GREATEST($3::double precision * 2.0, 30.0), 100.0) AS search_radius
-),
-road_source AS (
-    %s
-),
-last_roads AS (
-    SELECT
-        r.geom
-    FROM road_source r
-    WHERE $5 <> 0
-      AND r.road_id = $5
 ),
 nearby_roads AS (
     SELECT
@@ -156,7 +146,103 @@ nearby_roads AS (
         p.gps_geom,
         ST_Distance(r.geom, p.gps_geom) AS distance_meters,
         p.search_radius
-    FROM road_source r
+    FROM roads r
+    CROSS JOIN params p
+    WHERE r.highway IS NOT NULL
+      AND r.highway IN (
+          'motorway',
+          'trunk',
+          'primary',
+          'secondary',
+          'tertiary',
+          'unclassified',
+          'residential',
+          'living_street',
+          'service',
+          'motorway_link',
+          'trunk_link',
+          'primary_link',
+          'secondary_link',
+          'tertiary_link'
+      )
+      AND r.geom && ST_Expand(p.gps_geom, p.search_radius)
+      AND ST_DWithin(r.geom, p.gps_geom, p.search_radius)
+),
+preselected AS (
+    SELECT *
+    FROM nearby_roads
+    ORDER BY distance_meters ASC
+    LIMIT ($4::integer * 4)
+),
+localized AS (
+    SELECT
+        *,
+        ST_LineLocatePoint(geom, gps_geom) AS line_fraction,
+        NULLIF(ST_Length(geom), 0) AS geom_length
+    FROM preselected
+),
+scored AS (
+    SELECT
+        *,
+        GREATEST(0, 1 - distance_meters / search_radius) AS distance_score,
+        COALESCE(
+            DEGREES(
+                ST_Azimuth(
+                    ST_LineInterpolatePoint(
+                        geom,
+                        GREATEST(line_fraction - LEAST(10.0 / geom_length, 0.01), 0.0)
+                    ),
+                    ST_LineInterpolatePoint(
+                        geom,
+                        LEAST(line_fraction + LEAST(10.0 / geom_length, 0.01), 1.0)
+                    )
+                )
+            ),
+            0.0
+        ) AS local_bearing
+    FROM localized
+)
+SELECT
+    road_id,
+    osm_id,
+    name,
+    highway,
+    oneway,
+    distance_meters,
+    distance_score,
+    local_bearing,
+    %s AS connectivity
+FROM scored
+ORDER BY distance_score DESC, distance_meters ASC
+LIMIT ($4::integer * 2);
+`
+
+var candidateSQLRoadsNoConnectivity = fmt.Sprintf(candidateSQLRoadsBase, "'unknown'")
+
+const candidateSQLRoadsWithConnectivity = `
+WITH params AS (
+    SELECT
+        ST_Transform(ST_SetSRID(ST_MakePoint($1, $2), 4326), 3857) AS gps_geom,
+        LEAST(GREATEST($3::double precision * 2.0, 30.0), 100.0) AS search_radius
+),
+last_roads AS (
+    SELECT
+        r.geom
+    FROM roads r
+    WHERE r.road_id = $5
+),
+nearby_roads AS (
+    SELECT
+        r.road_id,
+        r.osm_id,
+        COALESCE(r.name, '') AS name,
+        COALESCE(r.highway, '') AS highway,
+        COALESCE(r.oneway, '') AS oneway,
+        r.geom,
+        p.gps_geom,
+        ST_Distance(r.geom, p.gps_geom) AS distance_meters,
+        p.search_radius
+    FROM roads r
     CROSS JOIN params p
     WHERE r.highway IS NOT NULL
       AND r.highway IN (
@@ -222,7 +308,6 @@ SELECT
     distance_score,
     local_bearing,
     CASE
-        WHEN $5 = 0 THEN 'unknown'
         WHEN road_id = $5 THEN 'same_road'
         WHEN EXISTS (
             SELECT 1
@@ -237,9 +322,10 @@ LIMIT ($4::integer * 2);
 `
 
 type PostGISMatcher struct {
-	pool         *pgxpool.Pool
-	candidateSQL string
-	debug        bool
+	pool                       *pgxpool.Pool
+	candidateSQL               string
+	candidateSQLNoConnectivity string
+	debug                      bool
 }
 
 func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string, debug bool) (*PostGISMatcher, error) {
@@ -248,15 +334,18 @@ func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string, debug bool) (*PostG
 		return nil, err
 	}
 
-	template := candidateSQLTemplateRaw
+	candidateSQL := fmt.Sprintf(candidateSQLTemplateRaw, sourceSQL)
+	candidateSQLNoConnectivity := candidateSQL
 	if isNormalizedRoadTable(roadTable) {
-		template = candidateSQLTemplateRoads
+		candidateSQL = candidateSQLRoadsWithConnectivity
+		candidateSQLNoConnectivity = candidateSQLRoadsNoConnectivity
 	}
 
 	return &PostGISMatcher{
-		pool:         pool,
-		candidateSQL: fmt.Sprintf(template, sourceSQL),
-		debug:        debug,
+		pool:                       pool,
+		candidateSQL:               candidateSQL,
+		candidateSQLNoConnectivity: candidateSQLNoConnectivity,
+		debug:                      debug,
 	}, nil
 }
 
@@ -304,7 +393,11 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 
 	queryStart := time.Now()
 	m.debugLogf("postgis query start sequence=%d", req.GetSequenceId())
-	rows, err := m.pool.Query(ctx, m.candidateSQL, req.GetLon(), req.GetLat(), req.GetAccuracy(), limit, req.GetLastRoadId())
+	query := m.candidateSQL
+	if req.GetLastRoadId() == 0 {
+		query = m.candidateSQLNoConnectivity
+	}
+	rows, err := m.pool.Query(ctx, query, req.GetLon(), req.GetLat(), req.GetAccuracy(), limit, req.GetLastRoadId())
 	if err != nil {
 		return nil, fmt.Errorf("query postgis candidates: %w", err)
 	}
