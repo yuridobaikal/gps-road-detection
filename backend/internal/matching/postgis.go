@@ -394,10 +394,12 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 	queryStart := time.Now()
 	m.debugLogf("postgis query start sequence=%d", req.GetSequenceId())
 	query := m.candidateSQL
+	args := []any{req.GetLon(), req.GetLat(), req.GetAccuracy(), limit, req.GetLastRoadId()}
 	if req.GetLastRoadId() == 0 {
 		query = m.candidateSQLNoConnectivity
+		args = args[:4]
 	}
-	rows, err := m.pool.Query(ctx, query, req.GetLon(), req.GetLat(), req.GetAccuracy(), limit, req.GetLastRoadId())
+	rows, err := m.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query postgis candidates: %w", err)
 	}
