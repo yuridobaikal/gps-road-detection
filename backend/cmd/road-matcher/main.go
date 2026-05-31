@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -19,7 +21,9 @@ import (
 	"github.com/yurido/gps-road-detection/backend/internal/matching"
 	"github.com/yurido/gps-road-detection/backend/internal/triplog"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 )
 
 type roadMatcherServer struct {
@@ -60,9 +64,11 @@ func (s *roadMatcherServer) StreamGps(stream pb.RoadMatcher_StreamGpsServer) err
 	for {
 		req, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
+			s.debugLogf("stream closed by client")
 			return nil
 		}
 		if err != nil {
+			log.Printf("stream receive error: %v", err)
 			return err
 		}
 
@@ -86,6 +92,7 @@ func (s *roadMatcherServer) StreamGps(stream pb.RoadMatcher_StreamGpsServer) err
 		sendStart := time.Now()
 		s.debugLogf("stream send start sequence=%d device=%s", req.GetSequenceId(), req.GetDeviceId())
 		if err := stream.Send(clientResp); err != nil {
+			log.Printf("stream send error sequence=%d device=%s: %v", req.GetSequenceId(), req.GetDeviceId(), err)
 			return err
 		}
 		s.debugLogf("stream send done sequence=%d device=%s send_ms=%.1f total_ms=%.1f", req.GetSequenceId(), req.GetDeviceId(), elapsedMs(sendStart), elapsedMs(receivedAt))
@@ -239,6 +246,9 @@ func main() {
 	if commonLogFile != nil {
 		defer commonLogFile.Close()
 	}
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	defer recoverAndExit("main")
+	log.Printf("road matcher process starting pid=%d", os.Getpid())
 
 	ctx := context.Background()
 	matcher, cleanup := buildMatcher(ctx, cfg)
@@ -259,7 +269,10 @@ func main() {
 		log.Fatalf("listen on %s: %v", cfg.GRPCAddr, err)
 	}
 
-	server := grpc.NewServer()
+	server := grpc.NewServer(
+		grpc.UnaryInterceptor(recoverUnaryInterceptor),
+		grpc.StreamInterceptor(recoverStreamInterceptor),
+	)
 	pb.RegisterRoadMatcherServer(server, &roadMatcherServer{
 		matcher:    matcher,
 		logLevel:   cfg.LogLevel,
@@ -267,16 +280,31 @@ func main() {
 	})
 	reflection.Register(server)
 
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("road matcher gRPC server listening on %s config=%s mode=%s road_table=%s log_level=%s log_file=%s trip_log_enabled=%t trip_log_dir=%s trip_log_max_bytes=%d", cfg.GRPCAddr, configPath, cfg.MatcherMode, cfg.RoadTable, cfg.LogLevel, cfg.LogFile, cfg.TripLogEnabled, cfg.TripLogDir, cfg.TripLogMaxBytes)
 		if err := server.Serve(listener); err != nil {
-			log.Fatalf("serve grpc: %v", err)
+			serveErr <- err
+			return
 		}
+		serveErr <- nil
 	}()
+	heartbeatStop := startHeartbeat()
+	defer heartbeatStop()
 
 	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	select {
+	case sig := <-stop:
+		log.Printf("received signal=%s", sig)
+	case err := <-serveErr:
+		if err != nil {
+			log.Printf("serve grpc stopped with error: %v", err)
+		} else {
+			log.Print("serve grpc stopped")
+		}
+		return
+	}
 
 	log.Print("shutting down road matcher gRPC server")
 	done := make(chan struct{})
@@ -287,8 +315,65 @@ func main() {
 
 	select {
 	case <-done:
+		log.Print("road matcher gRPC server stopped gracefully")
 	case <-time.After(5 * time.Second):
+		log.Print("graceful shutdown timed out; forcing gRPC server stop")
 		server.Stop()
+	}
+	log.Print("road matcher process stopped")
+}
+
+func recoverUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("panic in unary method=%s panic=%v\n%s", info.FullMethod, recovered, debug.Stack())
+			err = status.Error(codes.Internal, "internal server error")
+		}
+	}()
+	return handler(ctx, req)
+}
+
+func recoverStreamInterceptor(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("panic in stream method=%s panic=%v\n%s", info.FullMethod, recovered, debug.Stack())
+			err = status.Error(codes.Internal, "internal server error")
+		}
+	}()
+	return handler(srv, stream)
+}
+
+func recoverAndExit(scope string) {
+	if recovered := recover(); recovered != nil {
+		log.Printf("panic in %s panic=%v\n%s", scope, recovered, debug.Stack())
+		os.Exit(2)
+	}
+}
+
+func startHeartbeat() func() {
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				var stats runtime.MemStats
+				runtime.ReadMemStats(&stats)
+				log.Printf(
+					"heartbeat pid=%d goroutines=%d heap_alloc_mb=%.1f sys_mb=%.1f",
+					os.Getpid(),
+					runtime.NumGoroutine(),
+					float64(stats.HeapAlloc)/(1024*1024),
+					float64(stats.Sys)/(1024*1024),
+				)
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(stop)
 	}
 }
 

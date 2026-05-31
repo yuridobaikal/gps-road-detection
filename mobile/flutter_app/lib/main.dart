@@ -53,22 +53,105 @@ class RoadDetectorScreen extends StatefulWidget {
   State<RoadDetectorScreen> createState() => _RoadDetectorScreenState();
 }
 
+class BackendConfig {
+  const BackendConfig({
+    required this.host,
+    required this.port,
+    required this.deviceId,
+  });
+
+  final String host;
+  final int port;
+  final String deviceId;
+}
+
+class AppSettings {
+  const AppSettings({required this.backendConfig, required this.sendPolicy});
+
+  final BackendConfig backendConfig;
+  final SendPolicy sendPolicy;
+}
+
+class SendPolicy {
+  const SendPolicy({required this.rules});
+
+  final List<SendPolicyRule> rules;
+
+  factory SendPolicy.defaults() {
+    return const SendPolicy(
+      rules: [
+        SendPolicyRule(
+          maxSpeedMetersPerSecond: 1,
+          intervalMs: 3000,
+          minDistanceMeters: 0,
+        ),
+        SendPolicyRule(
+          maxSpeedMetersPerSecond: 2,
+          intervalMs: 1500,
+          minDistanceMeters: 5,
+        ),
+        SendPolicyRule(
+          maxSpeedMetersPerSecond: 10,
+          intervalMs: 1000,
+          minDistanceMeters: 8,
+        ),
+        SendPolicyRule(
+          maxSpeedMetersPerSecond: 20,
+          intervalMs: 500,
+          minDistanceMeters: 10,
+        ),
+        SendPolicyRule(
+          maxSpeedMetersPerSecond: null,
+          intervalMs: 300,
+          minDistanceMeters: 12,
+        ),
+      ],
+    );
+  }
+
+  SendPolicyRule ruleForSpeed(double speedMetersPerSecond) {
+    for (final rule in rules) {
+      final maxSpeed = rule.maxSpeedMetersPerSecond;
+      if (maxSpeed == null || speedMetersPerSecond < maxSpeed) {
+        return rule;
+      }
+    }
+    return rules.last;
+  }
+}
+
+class SendPolicyRule {
+  const SendPolicyRule({
+    required this.maxSpeedMetersPerSecond,
+    required this.intervalMs,
+    required this.minDistanceMeters,
+  });
+
+  final double? maxSpeedMetersPerSecond;
+  final int intervalMs;
+  final double minDistanceMeters;
+
+  Duration get interval => Duration(milliseconds: intervalMs);
+}
+
 class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
   final List<GpsHistoryPoint> _history = [];
-  late final TextEditingController _hostController;
-  late final TextEditingController _portController;
-  late final TextEditingController _deviceIdController;
+  late BackendConfig _backendConfig;
+  SendPolicy _sendPolicy = SendPolicy.defaults();
   StreamController<MatchRoadRequest>? _outgoing;
 
   ClientChannel? _channel;
   StreamSubscription<Position>? _gpsSubscription;
   StreamSubscription<MatchRoadResponse>? _matchSubscription;
+  Timer? _reconnectTimer;
+  Timer? _responseWatchdogTimer;
 
   Position? _position;
   MatchRoadResponse? _lastResponse;
   RoadCandidate? _lastConfidentRoad;
   int _sequence = 0;
   int _lastAcceptedSequence = 0;
+  int _receivedResponses = 0;
   int _lastMatchedRoadId = 0;
   final Map<int, DateTime> _sentAtBySequence = {};
   double? _lastRoundTripMs;
@@ -76,15 +159,77 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
   DateTime? _lastSentAt;
   Position? _lastSentPosition;
   String _status = 'Disconnected';
+  String _backendStatus = 'Disconnected';
   bool _tracking = false;
+  bool _backgroundTrackingLimited = false;
+  bool _connectingBackend = false;
+  int _reconnectAttempt = 0;
+  int _streamToken = 0;
   String? _connectedBackend;
+
+  Future<void> _closeBackendResources() async {
+    final matchSubscription = _matchSubscription;
+    final outgoing = _outgoing;
+    final channel = _channel;
+
+    _streamToken++;
+    _matchSubscription = null;
+    _outgoing = null;
+    _channel = null;
+    _connectedBackend = null;
+    _backendStatus = 'Disconnected';
+    _sentAtBySequence.clear();
+    _responseWatchdogTimer?.cancel();
+    _responseWatchdogTimer = null;
+
+    await _bestEffortClose(
+      matchSubscription?.cancel(),
+      label: 'match subscription',
+    );
+    await _bestEffortClose(outgoing?.close(), label: 'outgoing stream');
+    await _bestEffortClose(channel?.shutdown(), label: 'gRPC channel');
+  }
+
+  Future<void> _closeActiveResources() async {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _responseWatchdogTimer?.cancel();
+    _responseWatchdogTimer = null;
+
+    final gpsSubscription = _gpsSubscription;
+    _gpsSubscription = null;
+
+    await _bestEffortClose(
+      gpsSubscription?.cancel(),
+      label: 'GPS subscription',
+    );
+    await _closeBackendResources();
+  }
+
+  Future<void> _bestEffortClose(
+    Future<void>? close, {
+    required String label,
+  }) async {
+    if (close == null) {
+      return;
+    }
+    try {
+      await close.timeout(const Duration(seconds: 1));
+    } on TimeoutException {
+      debugPrint('Timed out closing $label');
+    } catch (error) {
+      debugPrint('Failed closing $label: $error');
+    }
+  }
 
   @override
   void initState() {
     super.initState();
-    _hostController = TextEditingController(text: _initialBackendHost());
-    _portController = TextEditingController(text: '$_backendPort');
-    _deviceIdController = TextEditingController(text: _deviceId);
+    _backendConfig = BackendConfig(
+      host: _initialBackendHost(),
+      port: _backendPort,
+      deviceId: _deviceId,
+    );
   }
 
   String _initialBackendHost() {
@@ -97,65 +242,132 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     return _defaultBackendHost;
   }
 
-  String get _selectedBackendHost => _hostController.text.trim();
-
-  int? get _selectedBackendPort {
-    final port = int.tryParse(_portController.text.trim());
-    if (port == null || port <= 0 || port > 65535) {
-      return null;
+  Future<bool> _connectStream({bool reconnecting = false}) async {
+    if (_connectingBackend) {
+      return _outgoing != null && !_outgoing!.isClosed;
     }
-    return port;
-  }
 
-  String get _selectedDeviceId {
-    final value = _deviceIdController.text.trim();
-    return value.isEmpty ? _deviceId : value;
-  }
+    _connectingBackend = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    try {
+      await _closeBackendResources();
 
-  Future<bool> _connectStream() async {
-    await _matchSubscription?.cancel();
-    await _channel?.shutdown();
-    await _outgoing?.close();
+      final outgoing = StreamController<MatchRoadRequest>();
 
-    final host = _selectedBackendHost;
-    final port = _selectedBackendPort;
-    if (host.isEmpty || port == null) {
-      setState(() => _status = 'Invalid backend host or port');
+      final channel = ClientChannel(
+        _backendConfig.host,
+        port: _backendConfig.port,
+        options: const ChannelOptions(
+          credentials: ChannelCredentials.insecure(),
+        ),
+      );
+
+      final client = RoadMatcherClient(channel);
+      final responseStream = client.streamGps(outgoing.stream);
+      final streamToken = ++_streamToken;
+
+      _matchSubscription = responseStream.listen(
+        _handleMatchResponse,
+        onError: (Object error) {
+          _handleBackendDisconnected(streamToken, 'Stream error: $error');
+        },
+        onDone: () {
+          _handleBackendDisconnected(streamToken, 'Stream closed');
+        },
+      );
+
+      setState(() {
+        _outgoing = outgoing;
+        _channel = channel;
+        _connectedBackend = '${_backendConfig.host}:${_backendConfig.port}';
+        _backendStatus = reconnecting ? 'Reconnected' : 'Stream opened';
+        _status = reconnecting
+            ? 'Reconnected to $_connectedBackend'
+            : 'Stream opened to $_connectedBackend';
+      });
+      return true;
+    } catch (error) {
+      if (mounted) {
+        setState(() => _status = 'Connect failed: $error');
+      }
       return false;
+    } finally {
+      _connectingBackend = false;
+    }
+  }
+
+  void _handleBackendDisconnected(int streamToken, String status) {
+    if (streamToken != _streamToken) {
+      return;
     }
 
-    final outgoing = StreamController<MatchRoadRequest>();
-
-    final channel = ClientChannel(
-      host,
-      port: port,
-      options: const ChannelOptions(credentials: ChannelCredentials.insecure()),
-    );
-
-    final client = RoadMatcherClient(channel);
-    final responseStream = client.streamGps(outgoing.stream);
-
-    _matchSubscription = responseStream.listen(
-      _handleMatchResponse,
-      onError: (Object error) {
-        if (mounted) {
-          setState(() => _status = 'Stream error: $error');
-        }
-      },
-      onDone: () {
-        if (mounted) {
-          setState(() => _status = 'Stream closed');
-        }
-      },
-    );
+    unawaited(_closeBackendResources());
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
-      _outgoing = outgoing;
-      _channel = channel;
-      _connectedBackend = '$host:$port';
-      _status = 'Stream opened to $_connectedBackend';
+      _backendStatus = status;
+      _status = status;
     });
-    return true;
+
+    if (_tracking) {
+      _scheduleReconnect();
+    }
+  }
+
+  void _scheduleReconnect() {
+    if (!_tracking || _reconnectTimer != null) {
+      return;
+    }
+
+    final delay = _nextReconnectDelay();
+    setState(() {
+      final reconnectStatus = 'Reconnecting in ${_formatDuration(delay)}';
+      _backendStatus = reconnectStatus;
+      _status = 'Backend disconnected; $reconnectStatus';
+    });
+
+    _reconnectTimer = Timer(delay, () {
+      _reconnectTimer = null;
+      if (!_tracking || !mounted) {
+        return;
+      }
+      setState(() {
+        _backendStatus = 'Reconnecting';
+        _status = 'Reconnecting backend';
+      });
+      unawaited(_reconnectBackend());
+    });
+  }
+
+  Duration _nextReconnectDelay() {
+    const delays = [
+      Duration(seconds: 1),
+      Duration(seconds: 2),
+      Duration(seconds: 5),
+      Duration(seconds: 10),
+      Duration(seconds: 30),
+    ];
+    final index = _reconnectAttempt.clamp(0, delays.length - 1);
+    _reconnectAttempt++;
+    return delays[index];
+  }
+
+  Future<void> _reconnectBackend() async {
+    final connected = await _connectStream(reconnecting: true);
+    if (!connected || !_tracking) {
+      if (mounted && _tracking) {
+        _scheduleReconnect();
+      }
+      return;
+    }
+
+    final latestPosition = _position;
+    if (latestPosition != null && _isValidPosition(latestPosition)) {
+      _sendPosition(latestPosition, force: true);
+    }
   }
 
   Future<void> _startTracking() async {
@@ -170,14 +382,11 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
       return;
     }
 
-    const settings = LocationSettings(
-      accuracy: LocationAccuracy.bestForNavigation,
-      distanceFilter: 5,
-    );
-
     await _gpsSubscription?.cancel();
-    _gpsSubscription = Geolocator.getPositionStream(locationSettings: settings)
-        .listen(
+    _gpsSubscription =
+        Geolocator.getPositionStream(
+          locationSettings: _locationSettings(),
+        ).listen(
           _handlePosition,
           onError: (Object error) {
             if (mounted) {
@@ -188,8 +397,43 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
 
     setState(() {
       _tracking = true;
-      _status = 'Tracking GPS';
+      _status = _backgroundTrackingLimited
+          ? 'Tracking GPS; iOS screen-off needs Location Always'
+          : 'Tracking GPS';
     });
+  }
+
+  LocationSettings _locationSettings() {
+    if (Platform.isAndroid) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 5,
+        intervalDuration: const Duration(milliseconds: 300),
+        foregroundNotificationConfig: const ForegroundNotificationConfig(
+          notificationTitle: 'Road Detector is tracking',
+          notificationText: 'GPS road matching is active for this trip.',
+          notificationChannelName: 'Road Detector tracking',
+          enableWakeLock: true,
+          setOngoing: true,
+        ),
+      );
+    }
+
+    if (Platform.isIOS) {
+      return AppleSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 5,
+        activityType: ActivityType.automotiveNavigation,
+        pauseLocationUpdatesAutomatically: false,
+        showBackgroundLocationIndicator: true,
+        allowBackgroundLocationUpdates: true,
+      );
+    }
+
+    return const LocationSettings(
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 5,
+    );
   }
 
   Future<bool> _requestLocationPermission() async {
@@ -202,6 +446,13 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
     }
+
+    if (Platform.isIOS && permission == LocationPermission.whileInUse) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    _backgroundTrackingLimited =
+        Platform.isIOS && permission == LocationPermission.whileInUse;
 
     return permission == LocationPermission.always ||
         permission == LocationPermission.whileInUse;
@@ -248,8 +499,7 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
   bool _shouldSend(Position position) {
     final now = DateTime.now();
     final speed = position.speed < 0 ? 0.0 : position.speed;
-    final interval = _intervalForSpeed(speed);
-    final minDistance = _minDistanceForSpeed(speed);
+    final rule = _sendPolicy.ruleForSpeed(speed);
 
     if (_lastSentAt == null || _lastSentPosition == null) {
       return true;
@@ -263,28 +513,25 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
       position.longitude,
     );
 
-    return elapsed >= interval || moved >= minDistance;
+    return elapsed >= rule.interval || moved >= rule.minDistanceMeters;
   }
 
-  Duration _intervalForSpeed(double speed) {
-    if (speed < 1) return const Duration(seconds: 3);
-    if (speed < 2) return const Duration(milliseconds: 1500);
-    if (speed < 10) return const Duration(seconds: 1);
-    if (speed < 20) return const Duration(milliseconds: 500);
-    return const Duration(milliseconds: 300);
-  }
+  void _sendPosition(Position position, {bool force = false}) {
+    final outgoing = _outgoing;
+    if (outgoing == null || outgoing.isClosed) {
+      if (_tracking) {
+        _scheduleReconnect();
+      } else {
+        setState(() {
+          _backendStatus = 'Disconnected';
+          _status = 'Backend disconnected';
+        });
+      }
+      return;
+    }
 
-  double _minDistanceForSpeed(double speed) {
-    if (speed < 1) return 0;
-    if (speed < 2) return 5;
-    if (speed < 10) return 8;
-    if (speed < 20) return 10;
-    return 12;
-  }
-
-  void _sendPosition(Position position) {
     final request = MatchRoadRequest(
-      deviceId: _selectedDeviceId,
+      deviceId: _backendConfig.deviceId,
       sequenceId: Int64(++_sequence),
       timestamp: DateTime.now().toUtc().toIso8601String(),
       lat: position.latitude,
@@ -296,19 +543,52 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
       history: _history,
     );
 
-    final outgoing = _outgoing;
-    if (outgoing == null || outgoing.isClosed) {
-      setState(() => _status = 'Stream is not open');
+    try {
+      outgoing.add(request);
+    } on StateError {
+      if (_tracking) {
+        _scheduleReconnect();
+      } else {
+        setState(() {
+          _backendStatus = 'Stream closed';
+          _status = 'Backend stream closed';
+        });
+      }
+      return;
+    } catch (error) {
+      if (_tracking) {
+        _scheduleReconnect();
+      } else {
+        setState(() {
+          _backendStatus = 'Send failed';
+          _status = 'Send failed: $error';
+        });
+      }
       return;
     }
 
-    outgoing.add(request);
     _sentAtBySequence[request.sequenceId.toInt()] = DateTime.now();
+    _scheduleResponseWatchdog(request.sequenceId.toInt());
 
     setState(() {
       _lastSentAt = DateTime.now();
       _lastSentPosition = position;
-      _status = 'Sent sequence ${request.sequenceId}';
+      _backendStatus = 'Sent sequence ${request.sequenceId}';
+      _status = force
+          ? 'Sent latest sequence ${request.sequenceId} after reconnect'
+          : 'Sent sequence ${request.sequenceId}';
+    });
+  }
+
+  void _scheduleResponseWatchdog(int sequence) {
+    _responseWatchdogTimer?.cancel();
+    _responseWatchdogTimer = Timer(const Duration(seconds: 10), () {
+      if (!_tracking ||
+          _outgoing == null ||
+          _lastAcceptedSequence >= sequence) {
+        return;
+      }
+      _handleBackendDisconnected(_streamToken, 'No backend response for 10s');
     });
   }
 
@@ -327,12 +607,19 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
     _sentAtBySequence.removeWhere(
       (sequence, _) => sequence < responseSequence - 20,
     );
+    if (_sentAtBySequence.isEmpty) {
+      _responseWatchdogTimer?.cancel();
+      _responseWatchdogTimer = null;
+    }
 
     setState(() {
+      _reconnectAttempt = 0;
       _lastAcceptedSequence = responseSequence;
+      _receivedResponses++;
       _lastResponse = response;
       _lastRoundTripMs = roundTripMs;
       _lastAcceptedAt = receivedAt;
+      _backendStatus = 'Received sequence $responseSequence';
       if (best != null) {
         _lastMatchedRoadId = best.roadId.toInt();
         if (response.confidence == 'high' || response.confidence == 'medium') {
@@ -344,30 +631,18 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
   }
 
   Future<void> _stopTracking() async {
-    await _gpsSubscription?.cancel();
-    await _matchSubscription?.cancel();
-    await _outgoing?.close();
-    await _channel?.shutdown();
-    _gpsSubscription = null;
-    _matchSubscription = null;
-    _outgoing = null;
-    _channel = null;
     setState(() {
       _tracking = false;
       _connectedBackend = null;
+      _backendStatus = 'Disconnected';
       _status = 'GPS tracking stopped';
     });
+    unawaited(_closeActiveResources());
   }
 
   @override
   void dispose() {
-    _gpsSubscription?.cancel();
-    _matchSubscription?.cancel();
-    _outgoing?.close();
-    _channel?.shutdown();
-    _hostController.dispose();
-    _portController.dispose();
-    _deviceIdController.dispose();
+    unawaited(_closeActiveResources());
     super.dispose();
   }
 
@@ -385,27 +660,27 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
             onPressed: _tracking ? null : _connectStream,
             icon: const Icon(Icons.sync),
           ),
+          IconButton(
+            tooltip: 'Settings',
+            onPressed: _tracking ? null : _openSettingsScreen,
+            icon: const Icon(Icons.tune),
+          ),
         ],
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          _BackendConfigPanel(
-            hostController: _hostController,
-            portController: _portController,
-            deviceIdController: _deviceIdController,
-            enabled: !_tracking,
-            onReconnect: _tracking ? null : _connectStream,
-          ),
-          const SizedBox(height: 12),
           _StatusPanel(
             status: _status,
             backend:
                 _connectedBackend ??
-                '$_selectedBackendHost:${_selectedBackendPort ?? '-'}',
+                '${_backendConfig.host}:${_backendConfig.port}',
             tracking: _tracking,
             sequence: _sequence,
             acceptedSequence: _lastAcceptedSequence,
+            receivedResponses: _receivedResponses,
+            pendingResponses: _sentAtBySequence.length,
+            backendStatus: _backendStatus,
             roundTripMs: _lastRoundTripMs,
             backendProcessingMs: _lastResponse?.processingDurationMs,
             responseAge: _lastAcceptedAt == null
@@ -434,15 +709,38 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
       ),
     );
   }
+
+  Future<void> _openSettingsScreen() async {
+    final updated = await Navigator.of(context).push<AppSettings>(
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          backendConfig: _backendConfig,
+          sendPolicy: _sendPolicy,
+        ),
+      ),
+    );
+    if (updated == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _backendConfig = updated.backendConfig;
+      _sendPolicy = updated.sendPolicy;
+      _connectedBackend = null;
+      _status = 'Settings updated';
+    });
+  }
 }
 
 class _StatusPanel extends StatelessWidget {
   const _StatusPanel({
     required this.status,
     required this.backend,
+    required this.backendStatus,
     required this.tracking,
     required this.sequence,
     required this.acceptedSequence,
+    required this.receivedResponses,
+    required this.pendingResponses,
     required this.roundTripMs,
     required this.backendProcessingMs,
     required this.responseAge,
@@ -450,9 +748,12 @@ class _StatusPanel extends StatelessWidget {
 
   final String status;
   final String backend;
+  final String backendStatus;
   final bool tracking;
   final int sequence;
   final int acceptedSequence;
+  final int receivedResponses;
+  final int pendingResponses;
   final double? roundTripMs;
   final double? backendProcessingMs;
   final Duration? responseAge;
@@ -469,94 +770,15 @@ class _StatusPanel extends StatelessWidget {
           ),
           _Metric(label: 'Status', value: status),
           _Metric(label: 'Backend', value: backend),
+          _Metric(label: 'Backend state', value: backendStatus),
           _Metric(label: 'GPS', value: tracking ? 'on' : 'off'),
           _Metric(label: 'Sent', value: '$sequence'),
-          _Metric(label: 'Accepted', value: '$acceptedSequence'),
+          _Metric(label: 'Received', value: '$receivedResponses'),
+          _Metric(label: 'Last accepted', value: '$acceptedSequence'),
+          _Metric(label: 'Pending', value: '$pendingResponses'),
           _Metric(label: 'Backend ms', value: _formatMs(backendProcessingMs)),
           _Metric(label: 'Round trip', value: _formatMs(roundTripMs)),
           _Metric(label: 'Age', value: _formatDuration(responseAge)),
-        ],
-      ),
-    );
-  }
-}
-
-class _BackendConfigPanel extends StatelessWidget {
-  const _BackendConfigPanel({
-    required this.hostController,
-    required this.portController,
-    required this.deviceIdController,
-    required this.enabled,
-    required this.onReconnect,
-  });
-
-  final TextEditingController hostController;
-  final TextEditingController portController;
-  final TextEditingController deviceIdController;
-  final bool enabled;
-  final Future<bool> Function()? onReconnect;
-
-  @override
-  Widget build(BuildContext context) {
-    return _Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: _PanelTitle(icon: Icons.dns, text: 'Backend'),
-              ),
-              IconButton(
-                tooltip: 'Reconnect',
-                onPressed: onReconnect,
-                icon: const Icon(Icons.sync),
-              ),
-            ],
-          ),
-          TextField(
-            controller: hostController,
-            enabled: enabled,
-            decoration: const InputDecoration(
-              labelText: 'Host',
-              border: OutlineInputBorder(),
-              isDense: true,
-            ),
-            keyboardType: TextInputType.url,
-            textInputAction: TextInputAction.next,
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: portController,
-                  enabled: enabled,
-                  decoration: const InputDecoration(
-                    labelText: 'Port',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  keyboardType: TextInputType.number,
-                  textInputAction: TextInputAction.next,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                flex: 2,
-                child: TextField(
-                  controller: deviceIdController,
-                  enabled: enabled,
-                  decoration: const InputDecoration(
-                    labelText: 'Device ID',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  textInputAction: TextInputAction.done,
-                ),
-              ),
-            ],
-          ),
         ],
       ),
     );
@@ -579,6 +801,321 @@ String _formatDuration(Duration? duration) {
     return '$ms ms';
   }
   return '${(ms / 1000).toStringAsFixed(1)} s';
+}
+
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({
+    super.key,
+    required this.backendConfig,
+    required this.sendPolicy,
+  });
+
+  final BackendConfig backendConfig;
+  final SendPolicy sendPolicy;
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  late final TextEditingController _hostController;
+  late final TextEditingController _portController;
+  late final TextEditingController _deviceIdController;
+  late final List<_SendPolicyRuleControllers> _sendPolicyControllers;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _hostController = TextEditingController(text: widget.backendConfig.host);
+    _portController = TextEditingController(
+      text: '${widget.backendConfig.port}',
+    );
+    _deviceIdController = TextEditingController(
+      text: widget.backendConfig.deviceId,
+    );
+    _sendPolicyControllers = [
+      for (final rule in widget.sendPolicy.rules)
+        _SendPolicyRuleControllers.fromRule(rule),
+    ];
+  }
+
+  @override
+  void dispose() {
+    _hostController.dispose();
+    _portController.dispose();
+    _deviceIdController.dispose();
+    for (final controller in _sendPolicyControllers) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  void _save() {
+    final host = _hostController.text.trim();
+    final port = int.tryParse(_portController.text.trim());
+    final deviceId = _deviceIdController.text.trim();
+    if (host.isEmpty) {
+      setState(() => _error = 'Backend host is required');
+      return;
+    }
+    if (port == null || port <= 0 || port > 65535) {
+      setState(() => _error = 'Backend port must be 1-65535');
+      return;
+    }
+    if (deviceId.isEmpty) {
+      setState(() => _error = 'Device ID is required');
+      return;
+    }
+
+    final rules = <SendPolicyRule>[];
+    for (var i = 0; i < _sendPolicyControllers.length; i++) {
+      final controller = _sendPolicyControllers[i];
+      final maxSpeed = i == _sendPolicyControllers.length - 1
+          ? null
+          : double.tryParse(controller.maxSpeed.text.trim());
+      final intervalMs = int.tryParse(controller.intervalMs.text.trim());
+      final minDistance = double.tryParse(controller.minDistance.text.trim());
+
+      if (i != _sendPolicyControllers.length - 1 &&
+          (maxSpeed == null || maxSpeed <= 0)) {
+        setState(() => _error = 'Invalid max speed in band ${i + 1}');
+        return;
+      }
+      if (intervalMs == null || intervalMs <= 0) {
+        setState(() => _error = 'Invalid interval in band ${i + 1}');
+        return;
+      }
+      if (minDistance == null || minDistance < 0) {
+        setState(() => _error = 'Invalid min distance in band ${i + 1}');
+        return;
+      }
+      if (rules.isNotEmpty &&
+          maxSpeed != null &&
+          rules.last.maxSpeedMetersPerSecond != null &&
+          maxSpeed <= rules.last.maxSpeedMetersPerSecond!) {
+        setState(() => _error = 'Speed bands must increase');
+        return;
+      }
+
+      rules.add(
+        SendPolicyRule(
+          maxSpeedMetersPerSecond: maxSpeed,
+          intervalMs: intervalMs,
+          minDistanceMeters: minDistance,
+        ),
+      );
+    }
+
+    Navigator.of(context).pop(
+      AppSettings(
+        backendConfig: BackendConfig(
+          host: host,
+          port: port,
+          deviceId: deviceId,
+        ),
+        sendPolicy: SendPolicy(rules: rules),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Settings'),
+        actions: [TextButton(onPressed: _save, child: const Text('Save'))],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (_error != null) ...[
+            Text(
+              _error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            const SizedBox(height: 12),
+          ],
+          _BackendSettingsEditor(
+            hostController: _hostController,
+            portController: _portController,
+            deviceIdController: _deviceIdController,
+          ),
+          const SizedBox(height: 12),
+          const _PanelTitle(icon: Icons.speed, text: 'Send Policy'),
+          for (var i = 0; i < _sendPolicyControllers.length; i++) ...[
+            _SendPolicyRuleEditor(
+              index: i,
+              isLast: i == _sendPolicyControllers.length - 1,
+              controllers: _sendPolicyControllers[i],
+            ),
+            if (i != _sendPolicyControllers.length - 1)
+              const SizedBox(height: 12),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _BackendSettingsEditor extends StatelessWidget {
+  const _BackendSettingsEditor({
+    required this.hostController,
+    required this.portController,
+    required this.deviceIdController,
+  });
+
+  final TextEditingController hostController;
+  final TextEditingController portController;
+  final TextEditingController deviceIdController;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _PanelTitle(icon: Icons.dns, text: 'Backend'),
+          TextField(
+            controller: hostController,
+            decoration: const InputDecoration(
+              labelText: 'Host',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            keyboardType: TextInputType.url,
+            textInputAction: TextInputAction.next,
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: portController,
+                  decoration: const InputDecoration(
+                    labelText: 'Port',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: TextField(
+                  controller: deviceIdController,
+                  decoration: const InputDecoration(
+                    labelText: 'Device ID',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  textInputAction: TextInputAction.done,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SendPolicyRuleControllers {
+  _SendPolicyRuleControllers({
+    required this.maxSpeed,
+    required this.intervalMs,
+    required this.minDistance,
+  });
+
+  factory _SendPolicyRuleControllers.fromRule(SendPolicyRule rule) {
+    return _SendPolicyRuleControllers(
+      maxSpeed: TextEditingController(
+        text: rule.maxSpeedMetersPerSecond?.toStringAsFixed(1) ?? '',
+      ),
+      intervalMs: TextEditingController(text: '${rule.intervalMs}'),
+      minDistance: TextEditingController(
+        text: rule.minDistanceMeters.toStringAsFixed(1),
+      ),
+    );
+  }
+
+  final TextEditingController maxSpeed;
+  final TextEditingController intervalMs;
+  final TextEditingController minDistance;
+
+  void dispose() {
+    maxSpeed.dispose();
+    intervalMs.dispose();
+    minDistance.dispose();
+  }
+}
+
+class _SendPolicyRuleEditor extends StatelessWidget {
+  const _SendPolicyRuleEditor({
+    required this.index,
+    required this.isLast,
+    required this.controllers,
+  });
+
+  final int index;
+  final bool isLast;
+  final _SendPolicyRuleControllers controllers;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _PanelTitle(icon: Icons.speed, text: 'Band ${index + 1}'),
+          TextField(
+            controller: controllers.maxSpeed,
+            enabled: !isLast,
+            decoration: InputDecoration(
+              labelText: isLast ? 'Speed' : 'Max speed m/s',
+              hintText: isLast ? 'Any faster speed' : null,
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+            keyboardType: TextInputType.number,
+            textInputAction: TextInputAction.next,
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: controllers.intervalMs,
+                  decoration: const InputDecoration(
+                    labelText: 'Interval ms',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TextField(
+                  controller: controllers.minDistance,
+                  decoration: const InputDecoration(
+                    labelText: 'Min distance m',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  keyboardType: TextInputType.number,
+                  textInputAction: TextInputAction.next,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _RoadPanel extends StatelessWidget {
