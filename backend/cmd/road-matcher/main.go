@@ -234,6 +234,18 @@ func main() {
 	flag.StringVar(&cfg.RoadTable, "road-table", cfg.RoadTable, "road table: planet_osm_line, planet_osm_roads, or roads")
 	flag.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: info or debug")
 	flag.StringVar(&cfg.LogFile, "log-file", cfg.LogFile, "common backend log file; empty disables file logging")
+	flag.Float64Var(&cfg.SameRoadHysteresisMargin, "same-road-hysteresis-margin", cfg.SameRoadHysteresisMargin, "score margin for keeping the same road")
+	flag.Float64Var(&cfg.UnconnectedJumpHysteresisMargin, "unconnected-jump-hysteresis-margin", cfg.UnconnectedJumpHysteresisMargin, "score margin for avoiding jumps to unconnected roads")
+	flag.Float64Var(&cfg.HistoryBearingMinDistanceMeters, "history-bearing-min-distance-meters", cfg.HistoryBearingMinDistanceMeters, "minimum GPS history movement distance to use history bearing")
+	flag.Float64Var(&cfg.HistoryBearingMaxAgeSeconds, "history-bearing-max-age-seconds", cfg.HistoryBearingMaxAgeSeconds, "maximum age of GPS history point to use history bearing")
+	flag.Float64Var(&cfg.HistoryBearingMinSpeedMPS, "history-bearing-min-speed-mps", cfg.HistoryBearingMinSpeedMPS, "minimum speed to use history bearing")
+	flag.Float64Var(&cfg.DistanceScoreWeight, "distance-score-weight", cfg.DistanceScoreWeight, "distance score weight")
+	flag.Float64Var(&cfg.HeadingScoreWeight, "heading-score-weight", cfg.HeadingScoreWeight, "heading score weight")
+	flag.Float64Var(&cfg.ConnectivityScoreWeight, "connectivity-score-weight", cfg.ConnectivityScoreWeight, "connectivity score weight")
+	flag.Float64Var(&cfg.RoadClassScoreWeight, "road-class-score-weight", cfg.RoadClassScoreWeight, "road class score weight")
+	flag.Float64Var(&cfg.SpeedScoreWeight, "speed-score-weight", cfg.SpeedScoreWeight, "speed-aware road class score weight")
+	flag.Float64Var(&cfg.MediumSpeedMPS, "medium-speed-mps", cfg.MediumSpeedMPS, "speed threshold for medium speed road scoring")
+	flag.Float64Var(&cfg.HighSpeedMPS, "high-speed-mps", cfg.HighSpeedMPS, "speed threshold for high speed road scoring")
 	flag.BoolVar(&cfg.TripLogEnabled, "trip-log-enabled", cfg.TripLogEnabled, "write replayable trip JSONL logs")
 	flag.StringVar(&cfg.TripLogDir, "trip-log-dir", cfg.TripLogDir, "directory for trip JSONL logs")
 	flag.Int64Var(&cfg.TripLogMaxBytes, "trip-log-max-bytes", cfg.TripLogMaxBytes, "rotate and gzip trip logs after this many bytes")
@@ -282,7 +294,7 @@ func main() {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Printf("road matcher gRPC server listening on %s config=%s mode=%s road_table=%s log_level=%s log_file=%s trip_log_enabled=%t trip_log_dir=%s trip_log_max_bytes=%d", cfg.GRPCAddr, configPath, cfg.MatcherMode, cfg.RoadTable, cfg.LogLevel, cfg.LogFile, cfg.TripLogEnabled, cfg.TripLogDir, cfg.TripLogMaxBytes)
+		log.Printf("road matcher gRPC server listening on %s config=%s mode=%s road_table=%s log_level=%s log_file=%s same_road_hysteresis_margin=%.3f unconnected_jump_hysteresis_margin=%.3f history_bearing_min_distance_meters=%.1f history_bearing_max_age_seconds=%.1f history_bearing_min_speed_mps=%.1f distance_score_weight=%.3f heading_score_weight=%.3f connectivity_score_weight=%.3f road_class_score_weight=%.3f speed_score_weight=%.3f medium_speed_mps=%.1f high_speed_mps=%.1f trip_log_enabled=%t trip_log_dir=%s trip_log_max_bytes=%d", cfg.GRPCAddr, configPath, cfg.MatcherMode, cfg.RoadTable, cfg.LogLevel, cfg.LogFile, cfg.SameRoadHysteresisMargin, cfg.UnconnectedJumpHysteresisMargin, cfg.HistoryBearingMinDistanceMeters, cfg.HistoryBearingMaxAgeSeconds, cfg.HistoryBearingMinSpeedMPS, cfg.DistanceScoreWeight, cfg.HeadingScoreWeight, cfg.ConnectivityScoreWeight, cfg.RoadClassScoreWeight, cfg.SpeedScoreWeight, cfg.MediumSpeedMPS, cfg.HighSpeedMPS, cfg.TripLogEnabled, cfg.TripLogDir, cfg.TripLogMaxBytes)
 		if err := server.Serve(listener); err != nil {
 			serveErr <- err
 			return
@@ -412,7 +424,20 @@ func buildMatcher(ctx context.Context, cfg config.Config) (matching.Matcher, fun
 			log.Fatalf("ping postgis database: %v", err)
 		}
 
-		matcher, err := matching.NewPostGISMatcher(pool, cfg.RoadTable, cfg.LogLevel == "debug")
+		matcher, err := matching.NewPostGISMatcher(pool, cfg.RoadTable, cfg.LogLevel == "debug", matching.PostGISMatcherOptions{
+			SameRoadHysteresisMargin:        cfg.SameRoadHysteresisMargin,
+			UnconnectedJumpHysteresisMargin: cfg.UnconnectedJumpHysteresisMargin,
+			HistoryBearingMinDistanceMeters: cfg.HistoryBearingMinDistanceMeters,
+			HistoryBearingMaxAgeSeconds:     cfg.HistoryBearingMaxAgeSeconds,
+			HistoryBearingMinSpeedMPS:       cfg.HistoryBearingMinSpeedMPS,
+			DistanceScoreWeight:             cfg.DistanceScoreWeight,
+			HeadingScoreWeight:              cfg.HeadingScoreWeight,
+			ConnectivityScoreWeight:         cfg.ConnectivityScoreWeight,
+			RoadClassScoreWeight:            cfg.RoadClassScoreWeight,
+			SpeedScoreWeight:                cfg.SpeedScoreWeight,
+			MediumSpeedMPS:                  cfg.MediumSpeedMPS,
+			HighSpeedMPS:                    cfg.HighSpeedMPS,
+		})
 		if err != nil {
 			pool.Close()
 			log.Fatal(err)

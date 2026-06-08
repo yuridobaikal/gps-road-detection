@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sort"
 	"strings"
 	"time"
 
@@ -225,9 +224,11 @@ WITH params AS (
         ST_Transform(ST_SetSRID(ST_MakePoint($1, $2), 4326), 3857) AS gps_geom,
         LEAST(GREATEST($3::double precision * 2.0, 30.0), 100.0) AS search_radius
 ),
-last_roads AS (
+last_road AS (
     SELECT
-        r.geom
+        r.road_id,
+        r.from_node_id,
+        r.to_node_id
     FROM roads r
     WHERE r.road_id = $5
 ),
@@ -238,6 +239,8 @@ nearby_roads AS (
         COALESCE(r.name, '') AS name,
         COALESCE(r.highway, '') AS highway,
         COALESCE(r.oneway, '') AS oneway,
+        r.from_node_id,
+        r.to_node_id,
         r.geom,
         p.gps_geom,
         ST_Distance(r.geom, p.gps_geom) AS distance_meters,
@@ -311,8 +314,17 @@ SELECT
         WHEN road_id = $5 THEN 'same_road'
         WHEN EXISTS (
             SELECT 1
-            FROM last_roads lr
-            WHERE ST_DWithin(lr.geom, scored.geom, 2.0)
+            FROM last_road lr
+            WHERE scored.from_node_id IS NOT NULL
+              AND scored.to_node_id IS NOT NULL
+              AND lr.from_node_id IS NOT NULL
+              AND lr.to_node_id IS NOT NULL
+              AND (
+                  scored.from_node_id = lr.from_node_id
+                  OR scored.from_node_id = lr.to_node_id
+                  OR scored.to_node_id = lr.from_node_id
+                  OR scored.to_node_id = lr.to_node_id
+              )
         ) THEN 'connected'
         ELSE 'unconnected'
     END AS connectivity
@@ -326,17 +338,109 @@ type PostGISMatcher struct {
 	candidateSQL               string
 	candidateSQLNoConnectivity string
 	debug                      bool
+	sameRoadHysteresisMargin   float64
+	unconnectedJumpMargin      float64
+	historyBearingMinDistance  float64
+	historyBearingMaxAge       float64
+	historyBearingMinSpeed     float64
+	scoreWeights               scoreWeights
+	mediumSpeedMPS             float64
+	highSpeedMPS               float64
 }
 
-func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string, debug bool) (*PostGISMatcher, error) {
+type PostGISMatcherOptions struct {
+	SameRoadHysteresisMargin        float64
+	UnconnectedJumpHysteresisMargin float64
+	HistoryBearingMinDistanceMeters float64
+	HistoryBearingMaxAgeSeconds     float64
+	HistoryBearingMinSpeedMPS       float64
+	DistanceScoreWeight             float64
+	HeadingScoreWeight              float64
+	ConnectivityScoreWeight         float64
+	RoadClassScoreWeight            float64
+	SpeedScoreWeight                float64
+	MediumSpeedMPS                  float64
+	HighSpeedMPS                    float64
+}
+
+func DefaultPostGISMatcherOptions() PostGISMatcherOptions {
+	return PostGISMatcherOptions{
+		SameRoadHysteresisMargin:        DefaultSameRoadHysteresisMargin,
+		UnconnectedJumpHysteresisMargin: DefaultUnconnectedJumpHysteresisMargin,
+		HistoryBearingMinDistanceMeters: DefaultHistoryBearingMinDistanceMeters,
+		HistoryBearingMaxAgeSeconds:     DefaultHistoryBearingMaxAgeSeconds,
+		HistoryBearingMinSpeedMPS:       DefaultHistoryBearingMinSpeedMPS,
+		DistanceScoreWeight:             DefaultDistanceScoreWeight,
+		HeadingScoreWeight:              DefaultHeadingScoreWeight,
+		ConnectivityScoreWeight:         DefaultConnectivityScoreWeight,
+		RoadClassScoreWeight:            DefaultRoadClassScoreWeight,
+		SpeedScoreWeight:                DefaultSpeedScoreWeight,
+		MediumSpeedMPS:                  DefaultMediumSpeedMPS,
+		HighSpeedMPS:                    DefaultHighSpeedMPS,
+	}
+}
+
+func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string, debug bool, options PostGISMatcherOptions) (*PostGISMatcher, error) {
 	sourceSQL, err := roadSourceSQL(roadTable)
 	if err != nil {
 		return nil, err
+	}
+	if options.SameRoadHysteresisMargin < 0 {
+		options.SameRoadHysteresisMargin = DefaultSameRoadHysteresisMargin
+	}
+	if options.UnconnectedJumpHysteresisMargin < 0 {
+		options.UnconnectedJumpHysteresisMargin = DefaultUnconnectedJumpHysteresisMargin
+	}
+	if options.HistoryBearingMinDistanceMeters <= 0 {
+		options.HistoryBearingMinDistanceMeters = DefaultHistoryBearingMinDistanceMeters
+	}
+	if options.HistoryBearingMaxAgeSeconds <= 0 {
+		options.HistoryBearingMaxAgeSeconds = DefaultHistoryBearingMaxAgeSeconds
+	}
+	if options.HistoryBearingMinSpeedMPS < 0 {
+		options.HistoryBearingMinSpeedMPS = DefaultHistoryBearingMinSpeedMPS
+	}
+	if options.DistanceScoreWeight < 0 {
+		options.DistanceScoreWeight = DefaultDistanceScoreWeight
+	}
+	if options.HeadingScoreWeight < 0 {
+		options.HeadingScoreWeight = DefaultHeadingScoreWeight
+	}
+	if options.ConnectivityScoreWeight < 0 {
+		options.ConnectivityScoreWeight = DefaultConnectivityScoreWeight
+	}
+	if options.RoadClassScoreWeight < 0 {
+		options.RoadClassScoreWeight = DefaultRoadClassScoreWeight
+	}
+	if options.SpeedScoreWeight < 0 {
+		options.SpeedScoreWeight = DefaultSpeedScoreWeight
+	}
+	weights := scoreWeights{
+		Distance:     options.DistanceScoreWeight,
+		Heading:      options.HeadingScoreWeight,
+		Connectivity: options.ConnectivityScoreWeight,
+		RoadClass:    options.RoadClassScoreWeight,
+		Speed:        options.SpeedScoreWeight,
+	}
+	if weights.sum() <= 0 {
+		weights = defaultScoreWeights()
+	}
+	if options.MediumSpeedMPS < 0 {
+		options.MediumSpeedMPS = DefaultMediumSpeedMPS
+	}
+	if options.HighSpeedMPS <= options.MediumSpeedMPS {
+		options.HighSpeedMPS = DefaultHighSpeedMPS
+		if options.HighSpeedMPS <= options.MediumSpeedMPS {
+			options.HighSpeedMPS = options.MediumSpeedMPS + 1
+		}
 	}
 
 	candidateSQL := fmt.Sprintf(candidateSQLTemplateRaw, sourceSQL)
 	candidateSQLNoConnectivity := candidateSQL
 	if isNormalizedRoadTable(roadTable) {
+		if err := requireRoadGraphColumns(context.Background(), pool); err != nil {
+			return nil, err
+		}
 		candidateSQL = candidateSQLRoadsWithConnectivity
 		candidateSQLNoConnectivity = candidateSQLRoadsNoConnectivity
 	}
@@ -346,6 +450,14 @@ func NewPostGISMatcher(pool *pgxpool.Pool, roadTable string, debug bool) (*PostG
 		candidateSQL:               candidateSQL,
 		candidateSQLNoConnectivity: candidateSQLNoConnectivity,
 		debug:                      debug,
+		sameRoadHysteresisMargin:   options.SameRoadHysteresisMargin,
+		unconnectedJumpMargin:      options.UnconnectedJumpHysteresisMargin,
+		historyBearingMinDistance:  options.HistoryBearingMinDistanceMeters,
+		historyBearingMaxAge:       options.HistoryBearingMaxAgeSeconds,
+		historyBearingMinSpeed:     options.HistoryBearingMinSpeedMPS,
+		scoreWeights:               weights,
+		mediumSpeedMPS:             options.MediumSpeedMPS,
+		highSpeedMPS:               options.HighSpeedMPS,
 	}, nil
 }
 
@@ -407,6 +519,17 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 	m.debugLogf("postgis query rows opened sequence=%d query_open_ms=%.1f", req.GetSequenceId(), elapsedMs(queryStart))
 
 	radius := searchRadius(req.GetAccuracy())
+	heading := selectEffectiveHeading(req, m.historyBearingMinDistance, m.historyBearingMaxAge, m.historyBearingMinSpeed)
+	if heading.Source == "history" {
+		m.debugLogf(
+			"history bearing selected sequence=%d heading=%.1f distance_meters=%.1f age_seconds=%.1f gps_heading=%.1f",
+			req.GetSequenceId(),
+			heading.Heading,
+			heading.DistanceMeters,
+			heading.AgeSeconds,
+			req.GetHeading(),
+		)
+	}
 	candidates := make([]*pb.RoadCandidate, 0, limit)
 	scanStart := time.Now()
 	scannedRows := 0
@@ -434,15 +557,20 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 		}
 
 		classScore := roadClassScore(candidate.Highway)
-		headingDiff := headingDiffForRoad(req.GetHeading(), localBearing, candidate.Oneway)
+		speedScore := speedClassScore(candidate.Highway, req.GetSpeed(), m.mediumSpeedMPS, m.highSpeedMPS)
+		headingDiff := headingDiffForRoad(heading.Heading, localBearing, candidate.Oneway)
 		candidate.DistanceScore = clamp(distanceScore, 0, 1)
 		candidate.HeadingDiff = headingDiff
 		candidate.HeadingScore = headingScore(headingDiff, req.GetSpeed())
 		candidate.ConnectivityScore = connectivityScore(candidate.Connectivity)
-		candidate.Score = candidate.DistanceScore*0.35 +
-			candidate.HeadingScore*0.25 +
-			candidate.ConnectivityScore*0.25 +
-			classScore*0.15
+		candidate.Score = candidateScore(
+			candidate.DistanceScore,
+			candidate.HeadingScore,
+			candidate.ConnectivityScore,
+			classScore,
+			speedScore,
+			m.scoreWeights,
+		)
 
 		if candidate.DistanceMeters > radius {
 			continue
@@ -456,12 +584,12 @@ func (m *PostGISMatcher) queryCandidates(ctx context.Context, req *pb.MatchRoadR
 	m.debugLogf("postgis scan done sequence=%d scanned_rows=%d accepted_candidates=%d scan_ms=%.1f", req.GetSequenceId(), scannedRows, len(candidates), elapsedMs(scanStart))
 
 	sortStart := time.Now()
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Score == candidates[j].Score {
-			return candidates[i].DistanceMeters < candidates[j].DistanceMeters
-		}
-		return candidates[i].Score > candidates[j].Score
-	})
+	sortCandidates(candidates, 0)
+	preferredRoadID := preferredRoadWithHysteresis(candidates, req.GetLastRoadId(), m.sameRoadHysteresisMargin, m.unconnectedJumpMargin)
+	if preferredRoadID != 0 {
+		m.debugLogf("hysteresis preferred road sequence=%d last_road_id=%d preferred_road_id=%d raw_best_road_id=%d", req.GetSequenceId(), req.GetLastRoadId(), preferredRoadID, candidates[0].GetRoadId())
+		sortCandidates(candidates, preferredRoadID)
+	}
 	if len(candidates) > int(limit) {
 		candidates = candidates[:limit]
 	}
@@ -516,6 +644,35 @@ func roadSourceSQL(roadTable string) (string, error) {
 
 func isNormalizedRoadTable(roadTable string) bool {
 	return strings.TrimSpace(roadTable) == "roads"
+}
+
+func requireRoadGraphColumns(ctx context.Context, pool *pgxpool.Pool) error {
+	var hasFromNodeID bool
+	var hasToNodeID bool
+	err := pool.QueryRow(ctx, `
+SELECT
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = 'roads'::regclass
+          AND attname = 'from_node_id'
+          AND NOT attisdropped
+    ),
+    EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = 'roads'::regclass
+          AND attname = 'to_node_id'
+          AND NOT attisdropped
+    );
+`).Scan(&hasFromNodeID, &hasToNodeID)
+	if err != nil {
+		return fmt.Errorf("check roads graph columns: %w", err)
+	}
+	if !hasFromNodeID || !hasToNodeID {
+		return fmt.Errorf("roads graph columns are missing; run: psql \"$DATABASE_URL\" -f backend/sql/003_build_road_graph.sql")
+	}
+	return nil
 }
 
 func headingDiffForRoad(gpsHeading, localBearing float64, oneway string) float64 {
