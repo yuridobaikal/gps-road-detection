@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:fixnum/fixnum.dart';
@@ -7,6 +8,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:grpc/grpc.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'gen/road_matcher.pbgrpc.dart';
 
@@ -24,6 +26,7 @@ const _deviceId = String.fromEnvironment(
 );
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const RoadDetectorApp());
 }
 
@@ -63,6 +66,33 @@ class BackendConfig {
   final String host;
   final int port;
   final String deviceId;
+
+  Map<String, Object?> toJson() {
+    return {'host': host, 'port': port, 'deviceId': deviceId};
+  }
+
+  static BackendConfig? fromJson(Object? value) {
+    if (value is! Map) {
+      return null;
+    }
+    final host = value['host'];
+    final port = value['port'];
+    final deviceId = value['deviceId'];
+    if (host is! String || host.trim().isEmpty) {
+      return null;
+    }
+    if (port is! int || port <= 0 || port > 65535) {
+      return null;
+    }
+    if (deviceId is! String || deviceId.trim().isEmpty) {
+      return null;
+    }
+    return BackendConfig(
+      host: host.trim(),
+      port: port,
+      deviceId: deviceId.trim(),
+    );
+  }
 }
 
 class AppSettings {
@@ -70,12 +100,67 @@ class AppSettings {
 
   final BackendConfig backendConfig;
   final SendPolicy sendPolicy;
+
+  Map<String, Object?> toJson() {
+    return {
+      'backendConfig': backendConfig.toJson(),
+      'sendPolicy': sendPolicy.toJson(),
+    };
+  }
+
+  static AppSettings? fromJson(Object? value) {
+    if (value is! Map) {
+      return null;
+    }
+    final backendConfig = BackendConfig.fromJson(value['backendConfig']);
+    final sendPolicy = SendPolicy.fromJson(value['sendPolicy']);
+    if (backendConfig == null || sendPolicy == null) {
+      return null;
+    }
+    return AppSettings(backendConfig: backendConfig, sendPolicy: sendPolicy);
+  }
 }
 
 class SendPolicy {
   const SendPolicy({required this.rules});
 
   final List<SendPolicyRule> rules;
+
+  Map<String, Object?> toJson() {
+    return {
+      'rules': [for (final rule in rules) rule.toJson()],
+    };
+  }
+
+  static SendPolicy? fromJson(Object? value) {
+    if (value is! Map) {
+      return null;
+    }
+    final rawRules = value['rules'];
+    if (rawRules is! List || rawRules.isEmpty) {
+      return null;
+    }
+
+    final rules = <SendPolicyRule>[];
+    for (final rawRule in rawRules) {
+      final rule = SendPolicyRule.fromJson(rawRule);
+      if (rule == null) {
+        return null;
+      }
+      rules.add(rule);
+    }
+    if (rules.last.maxSpeedMetersPerSecond != null) {
+      return null;
+    }
+    for (var i = 1; i < rules.length; i++) {
+      final previous = rules[i - 1].maxSpeedMetersPerSecond;
+      final current = rules[i].maxSpeedMetersPerSecond;
+      if (previous != null && current != null && current <= previous) {
+        return null;
+      }
+    }
+    return SendPolicy(rules: rules);
+  }
 
   factory SendPolicy.defaults() {
     return const SendPolicy(
@@ -132,6 +217,61 @@ class SendPolicyRule {
   final double minDistanceMeters;
 
   Duration get interval => Duration(milliseconds: intervalMs);
+
+  Map<String, Object?> toJson() {
+    return {
+      'maxSpeedMetersPerSecond': maxSpeedMetersPerSecond,
+      'intervalMs': intervalMs,
+      'minDistanceMeters': minDistanceMeters,
+    };
+  }
+
+  static SendPolicyRule? fromJson(Object? value) {
+    if (value is! Map) {
+      return null;
+    }
+    final maxSpeed = value['maxSpeedMetersPerSecond'];
+    final intervalMs = value['intervalMs'];
+    final minDistance = value['minDistanceMeters'];
+    if (maxSpeed != null && (maxSpeed is! num || maxSpeed <= 0)) {
+      return null;
+    }
+    if (intervalMs is! int || intervalMs <= 0) {
+      return null;
+    }
+    if (minDistance is! num || minDistance < 0) {
+      return null;
+    }
+    return SendPolicyRule(
+      maxSpeedMetersPerSecond: maxSpeed?.toDouble(),
+      intervalMs: intervalMs,
+      minDistanceMeters: minDistance.toDouble(),
+    );
+  }
+}
+
+class SettingsStore {
+  static const _settingsKey = 'road_detector.settings.v1';
+
+  static Future<AppSettings?> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_settingsKey);
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+
+    try {
+      return AppSettings.fromJson(jsonDecode(raw));
+    } catch (error) {
+      debugPrint('Failed to load settings: $error');
+      return null;
+    }
+  }
+
+  static Future<void> save(AppSettings settings) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_settingsKey, jsonEncode(settings.toJson()));
+  }
 }
 
 class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
@@ -230,6 +370,20 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
       port: _backendPort,
       deviceId: _deviceId,
     );
+    unawaited(_loadSavedSettings());
+  }
+
+  Future<void> _loadSavedSettings() async {
+    final saved = await SettingsStore.load();
+    if (saved == null || !mounted || _tracking) {
+      return;
+    }
+
+    setState(() {
+      _backendConfig = saved.backendConfig;
+      _sendPolicy = saved.sendPolicy;
+      _status = 'Settings loaded';
+    });
   }
 
   String _initialBackendHost() {
@@ -720,6 +874,10 @@ class _RoadDetectorScreenState extends State<RoadDetectorScreen> {
       ),
     );
     if (updated == null || !mounted) {
+      return;
+    }
+    await SettingsStore.save(updated);
+    if (!mounted) {
       return;
     }
     setState(() {

@@ -32,7 +32,7 @@ distinct_nodes AS (
     FROM endpoints
 )
 SELECT
-    row_number() OVER (ORDER BY x_key, y_key) AS node_id,
+    hashtextextended(x_key::text || ',' || y_key::text, 0) AS node_id,
     x_key,
     y_key,
     ST_SetSRID(ST_MakePoint(x_key * 0.01, y_key * 0.01), 3857) AS geom
@@ -54,13 +54,21 @@ ADD COLUMN IF NOT EXISTS from_node_id bigint;
 ALTER TABLE roads
 ADD COLUMN IF NOT EXISTS to_node_id bigint;
 
-WITH road_endpoint_keys AS (
+WITH road_endpoint_ids AS MATERIALIZED (
     SELECT
         road_id,
-        ROUND(ST_X(ST_StartPoint(geom)) / 0.01)::bigint AS from_x_key,
-        ROUND(ST_Y(ST_StartPoint(geom)) / 0.01)::bigint AS from_y_key,
-        ROUND(ST_X(ST_EndPoint(geom)) / 0.01)::bigint AS to_x_key,
-        ROUND(ST_Y(ST_EndPoint(geom)) / 0.01)::bigint AS to_y_key
+        hashtextextended(
+            ROUND(ST_X(ST_StartPoint(geom)) / 0.01)::bigint::text
+            || ','
+            || ROUND(ST_Y(ST_StartPoint(geom)) / 0.01)::bigint::text,
+            0
+        ) AS from_node_id,
+        hashtextextended(
+            ROUND(ST_X(ST_EndPoint(geom)) / 0.01)::bigint::text
+            || ','
+            || ROUND(ST_Y(ST_EndPoint(geom)) / 0.01)::bigint::text,
+            0
+        ) AS to_node_id
     FROM roads
     WHERE geom IS NOT NULL
       AND GeometryType(geom) = 'LINESTRING'
@@ -68,16 +76,14 @@ WITH road_endpoint_keys AS (
 )
 UPDATE roads r
 SET
-    from_node_id = from_node.node_id,
-    to_node_id = to_node.node_id
-FROM road_endpoint_keys k
-JOIN road_nodes from_node
-  ON from_node.x_key = k.from_x_key
- AND from_node.y_key = k.from_y_key
-JOIN road_nodes to_node
-  ON to_node.x_key = k.to_x_key
- AND to_node.y_key = k.to_y_key
-WHERE r.road_id = k.road_id;
+    from_node_id = k.from_node_id,
+    to_node_id = k.to_node_id
+FROM road_endpoint_ids k
+WHERE r.road_id = k.road_id
+  AND (
+      r.from_node_id IS DISTINCT FROM k.from_node_id
+      OR r.to_node_id IS DISTINCT FROM k.to_node_id
+  );
 
 CREATE INDEX IF NOT EXISTS roads_from_node_id_idx
 ON roads (from_node_id);
